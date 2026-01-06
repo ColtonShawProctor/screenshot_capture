@@ -1,0 +1,911 @@
+{
+  "name": "IDS Origination Agent V2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ids-origination-webhook",
+        "options": {}
+      },
+      "id": "webhook_trigger",
+      "name": "MCP Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "ids-origination-v2"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract and validate input parameters\nconst dealData = {\n  dealFolderPath: $input.first().json.deal_folder_path,\n  dealName: $input.first().json.deal_name,\n  originator: $input.first().json.originator || 'Unknown',\n  priority: $input.first().json.priority || 'normal',\n  timestamp: new Date().toISOString()\n};\n\n// Validate required fields\nif (!dealData.dealFolderPath || !dealData.dealName) {\n  throw new Error('Missing required fields: deal_folder_path and deal_name');\n}\n\n// Parse S3 path\nconst s3PathMatch = dealData.dealFolderPath.match(/s3:\\/\\/([^\\/]+)\\/(.*)\\//);\nif (!s3PathMatch) {\n  throw new Error('Invalid S3 path format. Expected: s3://bucket/path/');\n}\n\ndealData.bucket = s3PathMatch[1];\ndealData.prefix = s3PathMatch[2];\ndealData.outputPath = `${dealData.prefix}/outputs/`;\n\nreturn dealData;"
+      },
+      "id": "validate_input",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "bucketName": "={{ $json.bucket }}",
+        "prefix": "={{ $json.prefix }}",
+        "returnAll": true
+      },
+      "id": "list_s3_files",
+      "name": "List Deal Files",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "s3": {
+          "id": "digitalOceanSpaces",
+          "name": "Digital Ocean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Identify source documents by pattern matching\nconst files = $input.first().json.data || [];\nconst dealData = $node['Validate Input'].json;\n\nconst documentPatterns = {\n  quickSheet: /quick.*sheet|quicksheet/i,\n  termSheet: /term.*sheet|terms/i,\n  financialModel: /model|proforma/i,\n  appraisal: /appraisal/i,\n  rentRoll: /rent.*roll/i\n};\n\nconst identifiedDocs = {\n  quickSheet: null,\n  termSheet: null,\n  financialModel: null,\n  appraisal: null,\n  rentRoll: null\n};\n\nconst missingDocs = [];\n\n// Match files to document types\nfor (const file of files) {\n  const fileName = file.Key.toLowerCase();\n  \n  for (const [docType, pattern] of Object.entries(documentPatterns)) {\n    if (pattern.test(fileName) && !identifiedDocs[docType]) {\n      identifiedDocs[docType] = {\n        key: file.Key,\n        size: file.Size,\n        lastModified: file.LastModified\n      };\n    }\n  }\n}\n\n// Check for missing critical documents\nconst criticalDocs = ['quickSheet', 'termSheet', 'financialModel'];\nfor (const docType of criticalDocs) {\n  if (!identifiedDocs[docType]) {\n    missingDocs.push(docType);\n  }\n}\n\nreturn {\n  ...dealData,\n  identifiedDocs,\n  missingDocs,\n  totalFiles: files.length\n};"
+      },
+      "id": "identify_documents",
+      "name": "Identify Documents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.identifiedDocs.quickSheet !== null }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check_quick_sheet",
+      "name": "Has Quick Sheet?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "bucketName": "={{ $json.bucket }}",
+        "fileKey": "={{ $json.identifiedDocs.quickSheet.key }}",
+        "binaryPropertyName": "data"
+      },
+      "id": "download_quick_sheet",
+      "name": "Download Quick Sheet",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [1250, 100],
+      "credentials": {
+        "s3": {
+          "id": "digitalOceanSpaces",
+          "name": "Digital Ocean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"google/gemini-2.5-flash\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"Extract the following deal facts from this Quick Sheet document. Return as JSON:\\n\\n**Deal Info:**\\n- Loan Amount\\n- Loan Term\\n- Fixed or Floating rate\\n- Spread (bps)\\n- Interest Rate Floor\\n- Interest Reserve\\n- DD/UW Fee\\n- Origination/Exit Fee\\n- Target Close Date\\n- LTC Ratio\\n- LTC Value\\n\\n**Property Info:**\\n- Property Address (full)\\n- Property Type\\n- Property Location Description\\n- Proximity Statement (nearby landmarks, transit, etc.)\\n\\n**Sponsor Info:**\\n- Sponsor Name\\n- Sponsor Company\\n- Sponsor First Costs (equity contribution)\\n\\n**Other:**\\n- Originator Name\\n- Banking Relationship (if mentioned)\\n\\nReturn ONLY valid JSON, no markdown formatting.\"\n        },\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"data:{{ $binary.data.mimeType }};base64,{{ $binary.data.base64 }}\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "extract_quick_sheet",
+      "name": "Extract Quick Sheet Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openRouterApiKey",
+          "name": "OpenRouter API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse Gemini response and structure deal data\nconst response = $input.first().json;\nconst dealInfo = $node['Identify Documents'].json;\n\ntry {\n  // Extract JSON from response\n  const content = response.choices[0].message.content;\n  \n  // Clean up response if needed (remove markdown)\n  const jsonMatch = content.match(/{[\\s\\S]*}/);\n  const extractedData = JSON.parse(jsonMatch ? jsonMatch[0] : content);\n  \n  return {\n    ...dealInfo,\n    extractedData: {\n      quickSheet: extractedData,\n      timestamp: new Date().toISOString()\n    }\n  };\n} catch (error) {\n  return {\n    ...dealInfo,\n    extractedData: {\n      quickSheet: null,\n      error: `Failed to parse Quick Sheet: ${error.message}`\n    }\n  };\n}"
+      },
+      "id": "parse_quick_sheet",
+      "name": "Parse Quick Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.identifiedDocs.financialModel !== null }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check_financial_model",
+      "name": "Has Financial Model?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "bucketName": "={{ $json.bucket }}",
+        "fileKey": "={{ $json.identifiedDocs.financialModel.key }}",
+        "binaryPropertyName": "data"
+      },
+      "id": "download_financial_model",
+      "name": "Download Financial Model",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [1250, 400],
+      "credentials": {
+        "s3": {
+          "id": "digitalOceanSpaces",
+          "name": "Digital Ocean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://excel-screenshot:3000/convert",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"excelBase64\": \"{{ $binary.data.base64 }}\",\n  \"sheetName\": \"Sources & Uses\",\n  \"range\": \"A1:H30\",\n  \"filename\": \"su_table.png\"\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "capture_su_table",
+      "name": "Capture S&U Table",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 350]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://excel-screenshot:3000/convert",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"excelBase64\": \"{{ $node['Download Financial Model'].binary.data.base64 }}\",\n  \"sheetName\": \"Summary\",\n  \"range\": \"A1:F20\",\n  \"filename\": \"ltv_ltc_table.png\"\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "capture_ltv_table",
+      "name": "Capture LTV/LTC Table",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 450]
+    },
+    {
+      "parameters": {
+        "mode": "jsonToBinary",
+        "convertAllData": false,
+        "sourceKey": "image",
+        "destinationKey": "data",
+        "options": {
+          "mimeType": "image/png",
+          "dataIsBase64": true
+        }
+      },
+      "id": "convert_su_image",
+      "name": "Convert S&U to Binary",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1,
+      "position": [1650, 350]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "={{ $node['Parse Quick Sheet'].json.bucket }}",
+        "fileName": "={{ $node['Parse Quick Sheet'].json.outputPath }}su_table.png",
+        "binaryPropertyName": "data"
+      },
+      "id": "upload_su_table",
+      "name": "Upload S&U Table",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [1850, 350],
+      "credentials": {
+        "s3": {
+          "id": "digitalOceanSpaces",
+          "name": "Digital Ocean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.perplexity.ai/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"sonar-pro\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Research the following commercial property location. Provide:\\n\\n1. **Demographics:** Population, median household income, employment data for the submarket\\n2. **Market Overview:** Vacancy rates, rent trends, recent comparable sales in the area\\n3. **Economic Drivers:** Major employers, economic development projects, infrastructure\\n4. **Risk Factors:** Crime statistics, natural disaster risk (flood zone, earthquake, hurricane), environmental concerns\\n5. **Neighborhood Quality:** Walkability, transit access, nearby amenities\\n\\nProperty Address: {{ $node['Parse Quick Sheet'].json.extractedData.quickSheet.Property_Address }}\\nProperty Type: {{ $node['Parse Quick Sheet'].json.extractedData.quickSheet.Property_Type }}\\n\\nProvide a concise summary suitable for an underwriting memo.\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "property_research",
+      "name": "Property Location Research",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "perplexityApiKey",
+          "name": "Perplexity API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.perplexity.ai/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"sonar-pro\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Search for any red flags, violations, or issues related to this property:\\n\\nProperty: {{ $node['Parse Quick Sheet'].json.extractedData.quickSheet.Property_Name || $node['Parse Quick Sheet'].json.extractedData.quickSheet.Property_Address }}\\nAddress: {{ $node['Parse Quick Sheet'].json.extractedData.quickSheet.Property_Address }}\\n\\nLook for:\\n- Building code violations\\n- Health department violations\\n- Environmental issues or contamination\\n- Outstanding liens or judgments\\n- Lawsuits involving the property\\n- Zoning issues or variances\\n- Recent negative news coverage\\n\\nIf no issues found, explicitly state 'No red flags identified.' Include sources for any issues found.\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "property_red_flags",
+      "name": "Property Red Flags",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.perplexity.ai/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"sonar-pro\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Research the background of this commercial real estate sponsor/borrower:\\n\\nSponsor Name: {{ $node['Parse Quick Sheet'].json.extractedData.quickSheet.Sponsor_Name }}\\n\\nProvide:\\n1. **Experience:** Track record in commercial real estate, notable projects, years in business\\n2. **Portfolio:** Current holdings, geographic focus, asset types\\n3. **Financial Strength:** Any public information on net worth, liquidity (if available)\\n4. **Reputation:** Industry recognition, any negative press, litigation history\\n5. **Red Flags:** Bankruptcies, foreclosures, SEC actions, criminal matters\\n\\nBe factual and cite sources. If limited information available, state so clearly.\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "sponsor_research",
+      "name": "Sponsor Research",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"google/gemini-2.5-pro\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Based on the following sponsor research, assign a Borrower Risk Grade (A, B, C, D, or F) with justification.\\n\\nGrading Criteria:\\n- A: Excellent track record, strong financials, no red flags\\n- B: Good experience, adequate financials, minor concerns\\n- C: Limited experience or moderate concerns\\n- D: Significant concerns, requires additional mitigants\\n- F: Disqualifying issues identified\\n\\nSponsor Research:\\n{{ $node['Sponsor Research'].json.choices[0].message.content }}\\n\\nReturn JSON format:\\n{\\n  \\\"grade\\\": \\\"B\\\",\\n  \\\"justification\\\": \\\"...\\\",\\n  \\\"key_strengths\\\": [\\\"...\\\"],\\n  \\\"concerns\\\": [\\\"...\\\"],\\n  \\\"recommended_mitigants\\\": [\\\"...\\\"]\\n}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "borrower_grade",
+      "name": "Borrower Risk Grade",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2250, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openRouterApiKey",
+          "name": "OpenRouter API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Aggregate all research data\nconst dealData = $node['Parse Quick Sheet'].json;\nconst propertyResearch = $node['Property Location Research'].json;\nconst propertyRedFlags = $node['Property Red Flags'].json;\nconst sponsorResearch = $node['Sponsor Research'].json;\nconst borrowerGrade = JSON.parse($node['Borrower Risk Grade'].json.choices[0].message.content);\n\nreturn {\n  ...dealData,\n  research: {\n    property: {\n      location: propertyResearch.choices[0].message.content,\n      redFlags: propertyRedFlags.choices[0].message.content\n    },\n    sponsor: {\n      background: sponsorResearch.choices[0].message.content,\n      riskGrade: borrowerGrade\n    }\n  }\n};"
+      },
+      "id": "aggregate_research",
+      "name": "Aggregate Research",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"google/gemini-2.5-pro\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyze this commercial real estate deal and identify the TOP 5 KEY RISKS with corresponding mitigants.\\n\\nDeal Summary:\\n{{ JSON.stringify($node['Aggregate Research'].json.extractedData.quickSheet) }}\\n\\nProperty Research:\\n{{ $node['Aggregate Research'].json.research.property.location }}\\n\\nProperty Red Flags:\\n{{ $node['Aggregate Research'].json.research.property.redFlags }}\\n\\nSponsor Assessment:\\n{{ JSON.stringify($node['Aggregate Research'].json.research.sponsor.riskGrade) }}\\n\\nFor each risk, provide:\\n1. Risk Category (Market, Credit, Sponsor, Property, Regulatory, Environmental)\\n2. Risk Description (2-3 sentences)\\n3. Severity (High, Medium, Low)\\n4. Recommended Mitigant (specific, actionable)\\n\\nReturn as JSON array:\\n[\\n  {\\n    \\\"category\\\": \\\"Market\\\",\\n    \\\"risk\\\": \\\"...\\\",\\n    \\\"severity\\\": \\\"High\\\",\\n    \\\"mitigant\\\": \\\"...\\\"\\n  }\\n]\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "risk_analysis",
+      "name": "Risk Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2650, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openRouterApiKey",
+          "name": "OpenRouter API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "bucketName": "templates",
+        "fileKey": "IDS_Template_Fairbridge_Generic__5_.docx",
+        "binaryPropertyName": "template"
+      },
+      "id": "download_template",
+      "name": "Download IDS Template",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [2850, 200],
+      "credentials": {
+        "s3": {
+          "id": "digitalOceanSpaces",
+          "name": "Digital Ocean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate IDS document content\n// Note: This is a simplified version. In production, you'd use a document generation service\n// or the docx library to properly populate the Word template\n\nconst data = $input.first().json;\nconst template = $input.first().binary.template;\n\n// Extract all needed data\nconst quickSheet = data.extractedData.quickSheet || {};\nconst research = data.research || {};\nconst risks = JSON.parse($node['Risk Analysis'].json.choices[0].message.content);\n\n// Create placeholder mapping\nconst placeholders = {\n  '{{DATE}}': new Date().toLocaleDateString('en-US'),\n  '{{ORIGINATOR}}': data.originator,\n  '{{LOAN_AMOUNT}}': quickSheet.Loan_Amount || 'TBD',\n  '{{LOAN_TERM}}': quickSheet.Loan_Term || 'TBD',\n  '{{FIXED_FLOATING}}': quickSheet.Fixed_or_Floating || 'TBD',\n  '{{SPREAD_BPS}}': quickSheet.Spread || 'TBD',\n  '{{INTEREST_RATE_FLOOR}}': quickSheet.Interest_Rate_Floor || 'TBD',\n  '{{INTEREST_RESERVE}}': quickSheet.Interest_Reserve || 'TBD',\n  '{{DD_UW_FEE}}': quickSheet.DD_UW_Fee || 'TBD',\n  '{{ORIG_EXIT_FEE}}': quickSheet.Origination_Exit_Fee || 'TBD',\n  '{{TARGET_CLOSE_DATE}}': quickSheet.Target_Close_Date || 'TBD',\n  '{{LTC_RATIO}}': quickSheet.LTC_Ratio || 'TBD',\n  '{{LTC_VALUE}}': quickSheet.LTC_Value || 'TBD',\n  '{{PROPERTY_ADDRESS}}': quickSheet.Property_Address || 'TBD',\n  '{{PROPERTY_LOCATION_DESCRIPTION}}': quickSheet.Property_Location_Description || 'TBD',\n  '{{PROXIMITY_STATEMENT}}': quickSheet.Proximity_Statement || 'TBD',\n  '{{SPONSOR_NAME}}': quickSheet.Sponsor_Name || 'TBD',\n  '{{SPONSOR_COMPANY}}': quickSheet.Sponsor_Company || 'TBD',\n  '{{SPONSOR_FIRST_COSTS}}': quickSheet.Sponsor_First_Costs || 'TBD'\n};\n\n// For now, return the template as-is with metadata\n// In production, you'd use a proper document manipulation library\nreturn {\n  ...data,\n  idsData: {\n    placeholders,\n    risks,\n    templateReady: true\n  }\n};"
+      },
+      "id": "generate_ids",
+      "name": "Generate IDS Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3050, 200]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "={{ $json.bucket }}",
+        "fileName": "={{ $json.outputPath }}IDS_{{ $json.dealName.replace(/ /g, '_') }}_{{ $now.format('YYYY-MM-DD') }}.docx",
+        "binaryPropertyName": "template"
+      },
+      "id": "upload_ids",
+      "name": "Upload Final IDS",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [3250, 200],
+      "credentials": {
+        "s3": {
+          "id": "digitalOceanSpaces",
+          "name": "Digital Ocean Spaces"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate presigned URL for the uploaded IDS\nconst data = $input.first().json;\nconst uploadResult = $input.first().json;\n\n// Create the final response\nconst response = {\n  status: 'success',\n  deal_name: data.dealName,\n  ids_document_url: uploadResult.Location || `https://${data.bucket}.nyc3.digitaloceanspaces.com/${uploadResult.Key}`,\n  summary: {\n    property: data.extractedData.quickSheet?.Property_Address || 'Unknown',\n    loan_amount: data.extractedData.quickSheet?.Loan_Amount || 'TBD',\n    borrower_grade: data.research.sponsor?.riskGrade?.grade || 'TBD',\n    top_risk: data.idsData.risks?.[0]?.risk || 'No risks identified'\n  },\n  processing_time_seconds: Math.round((Date.now() - new Date(data.timestamp).getTime()) / 1000),\n  documents_processed: Object.entries(data.identifiedDocs)\n    .filter(([_, doc]) => doc !== null)\n    .map(([type, _]) => type),\n  missing_documents: data.missingDocs || []\n};\n\nreturn response;"
+      },
+      "id": "format_response",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3450, 200]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "error",
+              "value": "={{ $json.error.message || 'Unknown error occurred' }}"
+            },
+            {
+              "name": "status",
+              "value": "error"
+            },
+            {
+              "name": "dealName", 
+              "value": "={{ $node['Validate Input'].json.dealName || 'Unknown' }}"
+            }
+          ]
+        }
+      },
+      "id": "error_handler",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [3450, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "id": "webhook_response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3650, 300]
+    },
+    {
+      "parameters": {},
+      "id": "merge_quick_sheet",
+      "name": "Merge Quick Sheet",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1850, 200],
+      "typeVersion": 2.1
+    },
+    {
+      "parameters": {},
+      "id": "merge_tables",
+      "name": "Merge Tables",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1850, 450],
+      "typeVersion": 2.1
+    },
+    {
+      "parameters": {
+        "amount": 1,
+        "unit": "seconds"
+      },
+      "id": "delay_api_calls",
+      "name": "Rate Limit Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1850, 100]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.missingDocs.length }}",
+                    "rightValue": 3,
+                    "operation": "largerEqual"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "id": "check_critical_docs",
+      "name": "Critical Docs Missing?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1050, 600]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "error",
+              "value": "Critical documents missing: {{ $json.missingDocs.join(', ') }}"
+            },
+            {
+              "name": "status", 
+              "value": "error"
+            }
+          ]
+        }
+      },
+      "id": "missing_docs_error",
+      "name": "Missing Docs Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [1250, 700]
+    }
+  ],
+  "connections": {
+    "MCP Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "List Deal Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Deal Files": {
+      "main": [
+        [
+          {
+            "node": "Identify Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Identify Documents": {
+      "main": [
+        [
+          {
+            "node": "Check Critical Docs Missing?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Has Quick Sheet?",
+            "type": "main", 
+            "index": 0
+          },
+          {
+            "node": "Has Financial Model?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Quick Sheet?": {
+      "main": [
+        [
+          {
+            "node": "Download Quick Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Quick Sheet",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Download Quick Sheet": {
+      "main": [
+        [
+          {
+            "node": "Extract Quick Sheet Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Quick Sheet Data": {
+      "main": [
+        [
+          {
+            "node": "Parse Quick Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Quick Sheet": {
+      "main": [
+        [
+          {
+            "node": "Merge Quick Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Financial Model?": {
+      "main": [
+        [
+          {
+            "node": "Download Financial Model",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Tables",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Download Financial Model": {
+      "main": [
+        [
+          {
+            "node": "Capture S&U Table",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Capture LTV/LTC Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture S&U Table": {
+      "main": [
+        [
+          {
+            "node": "Convert S&U to Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert S&U to Binary": {
+      "main": [
+        [
+          {
+            "node": "Upload S&U Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload S&U Table": {
+      "main": [
+        [
+          {
+            "node": "Merge Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture LTV/LTC Table": {
+      "main": [
+        [
+          {
+            "node": "Merge Tables",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Rate Limit Delay": {
+      "main": [
+        [
+          {
+            "node": "Property Location Research",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Property Red Flags",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sponsor Research",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Property Location Research": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Research",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Property Red Flags": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Research",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Sponsor Research": {
+      "main": [
+        [
+          {
+            "node": "Borrower Risk Grade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Borrower Risk Grade": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Research",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Quick Sheet": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Research",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Merge Tables": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Research",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Aggregate Research": {
+      "main": [
+        [
+          {
+            "node": "Risk Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Risk Analysis": {
+      "main": [
+        [
+          {
+            "node": "Download IDS Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download IDS Template": {
+      "main": [
+        [
+          {
+            "node": "Generate IDS Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate IDS Content": {
+      "main": [
+        [
+          {
+            "node": "Upload Final IDS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Final IDS": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Critical Docs Missing?": {
+      "main": [
+        [
+          {
+            "node": "Missing Docs Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Missing Docs Error": {
+      "main": [
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {},
+  "versionId": "2.0",
+  "triggerCount": 1
+}

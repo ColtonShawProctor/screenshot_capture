@@ -1,0 +1,20 @@
+# Docker Compose for Coolify Deployment
+# This file is for the screenshot service only
+# n8n is already deployed separately
+
+services:
+  excel-screenshot:
+    build:
+      context: ./screenshot-service
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    # No ports exposed - internal communication only
+    # Service will be accessible at http://excel-screenshot:3000 from n8n

@@ -1,0 +1,10 @@
+# Ignore everything except ids-origination-agent-v2
+*
+!.gitignore
+!ids-origination-agent-v2/
+ids-origination-agent-v2/**/*
+
+# But include ids-origination-agent-v2 files
+!ids-origination-agent-v2/**
+!.gitignore
+
