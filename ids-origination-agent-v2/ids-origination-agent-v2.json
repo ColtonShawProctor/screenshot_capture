@@ -105,7 +105,7 @@
       "id": "extract_quick_sheet",
       "name": "Extract Quick Sheet Data",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [1450, 100],
       "credentials": {
         "httpHeaderAuth": {
@@ -163,7 +163,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://excel-screenshot:3000/convert",
+        "url": "https://e44kgo84cc8g0okggsw888o4.app9.anant.systems/convert",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={\n  \"excelBase64\": \"{{ $binary.data.base64 }}\",\n  \"sheetName\": \"Sources & Uses\",\n  \"range\": \"A1:H30\",\n  \"filename\": \"su_table.png\"\n}",
@@ -174,13 +174,13 @@
       "id": "capture_su_table",
       "name": "Capture S&U Table",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [1450, 350]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://excel-screenshot:3000/convert",
+        "url": "https://e44kgo84cc8g0okggsw888o4.app9.anant.systems/convert",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={\n  \"excelBase64\": \"{{ $node['Download Financial Model'].binary.data.base64 }}\",\n  \"sheetName\": \"Summary\",\n  \"range\": \"A1:F20\",\n  \"filename\": \"ltv_ltc_table.png\"\n}",
@@ -191,24 +191,17 @@
       "id": "capture_ltv_table",
       "name": "Capture LTV/LTC Table",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [1450, 450]
     },
     {
       "parameters": {
-        "mode": "jsonToBinary",
-        "convertAllData": false,
-        "sourceKey": "image",
-        "destinationKey": "data",
-        "options": {
-          "mimeType": "image/png",
-          "dataIsBase64": true
-        }
+        "functionCode": "// Convert base64 image response to binary data\nconst response = $input.first().json;\nconst imageBase64 = response.image;\n\nif (!imageBase64) {\n  throw new Error('No image data received from screenshot service');\n}\n\n// Convert base64 to binary\nconst binaryData = {\n  data: imageBase64,\n  mimeType: 'image/png',\n  fileExtension: 'png',\n  fileName: response.filename || 'screenshot.png'\n};\n\nreturn {\n  json: response,\n  binary: {\n    data: binaryData\n  }\n};"
       },
       "id": "convert_su_image",
       "name": "Convert S&U to Binary",
-      "type": "n8n-nodes-base.convertToFile",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [1650, 350]
     },
     {
@@ -246,7 +239,7 @@
       "id": "property_research",
       "name": "Property Location Research",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [2050, 100],
       "credentials": {
         "httpHeaderAuth": {
@@ -271,7 +264,7 @@
       "id": "property_red_flags",
       "name": "Property Red Flags",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [2050, 200]
     },
     {
@@ -290,7 +283,7 @@
       "id": "sponsor_research",
       "name": "Sponsor Research",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [2050, 300]
     },
     {
@@ -309,7 +302,7 @@
       "id": "borrower_grade",
       "name": "Borrower Risk Grade",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [2250, 300],
       "credentials": {
         "httpHeaderAuth": {
@@ -344,7 +337,7 @@
       "id": "risk_analysis",
       "name": "Risk Analysis",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "typeVersion": 3,
       "position": [2650, 200],
       "credentials": {
         "httpHeaderAuth": {
@@ -433,7 +426,7 @@
       "id": "error_handler",
       "name": "Error Handler",
       "type": "n8n-nodes-base.set",
-      "typeVersion": 3,
+      "typeVersion": 2,
       "position": [3450, 400]
     },
     {
@@ -453,8 +446,7 @@
       "name": "Merge Quick Sheet",
       "type": "n8n-nodes-base.merge",
       "typeVersion": 2,
-      "position": [1850, 200],
-      "typeVersion": 2.1
+      "position": [1850, 200]
     },
     {
       "parameters": {},
@@ -462,8 +454,7 @@
       "name": "Merge Tables",
       "type": "n8n-nodes-base.merge",
       "typeVersion": 2,
-      "position": [1850, 450],
-      "typeVersion": 2.1
+      "position": [1850, 450]
     },
     {
       "parameters": {
@@ -518,7 +509,7 @@
       "id": "missing_docs_error",
       "name": "Missing Docs Error",
       "type": "n8n-nodes-base.set",
-      "typeVersion": 3,
+      "typeVersion": 2,
       "position": [1250, 700]
     }
   ],
