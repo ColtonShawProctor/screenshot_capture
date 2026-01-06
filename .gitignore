@@ -8,3 +8,6 @@ ids-origination-agent-v2/**/*
 !ids-origination-agent-v2/**
 !.gitignore
 
+# Exclude node_modules
+**/node_modules/
+
