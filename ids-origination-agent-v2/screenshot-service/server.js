@@ -101,63 +101,88 @@ app.post('/convert', async (req, res) => {
       <head>
         <style>
           body {
-            font-family: 'Calibri', Arial, sans-serif;
+            font-family: Arial, 'Calibri', sans-serif;
             margin: 0;
             padding: 10px;
             background-color: white;
           }
+          
           table {
             border-collapse: collapse;
             width: auto;
             margin: 0;
-            font-size: 10pt;
+            font-size: 11pt;
+            border: 2px solid #999;
           }
           
-          /* Header row styling */
-          .header-row {
+          /* Header row styling - only for "Sources" and "Uses" row */
+          .header-row th {
             background-color: #1F4E79 !important;
             color: white;
             font-weight: bold;
-            font-size: 11pt;
           }
           
-          /* Section header styling */
-          .section-header {
-            background-color: #4472C4 !important;
-            color: white;
-            font-weight: bold;
-          }
-          
-          /* Data rows */
-          .data-row-odd {
-            background-color: white;
-          }
-          
-          .data-row-even {
-            background-color: #F2F2F2;
+          /* Section headers - italic and underlined */
+          .section-header td {
+            font-style: italic;
+            text-decoration: underline;
+            font-weight: normal;
+            background-color: white !important;
           }
           
           /* Total rows */
-          .total-row {
+          .total-row td {
             font-weight: bold;
-            border-top: 2px solid #333 !important;
+            border-top: 2px solid #666 !important;
+          }
+          
+          .total-row td:first-child {
+            border-top: 2px solid #666 !important;
           }
           
           /* Cell styling */
           th, td {
-            border: 1px solid #D0D0D0;
-            padding: 6px 12px;
+            border: 1px solid #999;
+            padding: 4px 8px;
             text-align: left;
             vertical-align: middle;
+            background-color: white;
           }
           
-          /* Number alignment and formatting */
-          .number, .currency, .percentage {
+          /* Dollar sign column */
+          .dollar-sign {
+            text-align: left;
+            width: 20px;
+            padding-right: 2px;
+          }
+          
+          /* Amount columns */
+          .amount {
             text-align: right;
+            padding-left: 2px;
           }
           
+          /* Percentage column */
+          .percentage {
+            text-align: right;
+            color: #0000FF;
+            font-style: italic;
+          }
+          
+          /* Bold text */
           .bold {
             font-weight: bold;
+          }
+          
+          /* Footnotes */
+          .footnotes {
+            margin-top: 10px;
+            font-size: 10pt;
+            font-family: Arial, sans-serif;
+          }
+          
+          .footnotes p {
+            margin: 2px 0;
           }
         </style>
       </head>
@@ -179,35 +204,34 @@ app.post('/convert', async (req, res) => {
       let isSectionHeader = false;
       let isTotalRow = false;
       
-      // First row is always header
-      if (i === 0) {
+      // Check for header row - "Sources and Uses" or just contains "Sources" in first cell
+      const firstCellValue = String(rowData[0].value || '').trim().toLowerCase();
+      
+      if (firstCellValue.includes('sources') && (firstCellValue.includes('uses') || 
+          rowData.some(cell => String(cell.value || '').toLowerCase().includes('uses')))) {
         isHeader = true;
         rowClass = 'header-row';
-      } else {
-        // Check if this is a section header (first cell has text, rest are empty)
-        const firstCellValue = String(rowData[0].value || '').trim();
-        const restAreEmpty = rowData.slice(1).every(cell => cell.isEmpty);
-        
-        if (firstCellValue && restAreEmpty && 
-            (firstCellValue.toLowerCase().includes('sources') || 
-             firstCellValue.toLowerCase().includes('uses') || 
-             firstCellValue.toLowerCase().includes('costs') || 
-             firstCellValue.toLowerCase().includes('financing'))) {
-          isSectionHeader = true;
-          rowClass = 'section-header';
-        }
-        // Check if this is a total row
-        else if (firstCellValue.toLowerCase().includes('total') || 
-                 rowData.some(cell => cell.cell.style?.font?.bold)) {
-          isTotalRow = true;
-          rowClass = 'total-row';
-        }
-        // Regular data row with alternating colors
-        else {
-          const isEven = dataRowCounter % 2 === 1;
-          rowClass = isEven ? 'data-row-even' : 'data-row-odd';
-          dataRowCounter++;
-        }
+      } 
+      // Check if this is a section header (Accretive Costs, Financing Costs, Closing Costs)
+      else if ((firstCellValue.includes('accretive') && firstCellValue.includes('costs')) ||
+               (firstCellValue.includes('financing') && firstCellValue.includes('costs')) ||
+               (firstCellValue.includes('closing') && firstCellValue.includes('costs')) ||
+               firstCellValue === 'costs' ||
+               firstCellValue === 'accretive costs' ||
+               firstCellValue === 'financing costs' ||
+               firstCellValue === 'closing costs') {
+        isSectionHeader = true;
+        rowClass = 'section-header';
+      }
+      // Check if this is a total row
+      else if (firstCellValue.includes('total') || 
+               rowData.some(cell => cell.cell.style?.font?.bold)) {
+        isTotalRow = true;
+        rowClass = 'total-row';
+      }
+      // Regular data row - all white background
+      else {
+        rowClass = 'data-row';
       }
       
       html += `<tr class="${rowClass}">`;
@@ -222,30 +246,41 @@ app.post('/convert', async (req, res) => {
         let displayValue = String(cellInfo.value || '');
 
         if (displayValue) {
-          // Apply number formatting and alignment
-          const numValue = parseFloat(displayValue.replace(/[^0-9.-]/g, ''));
+          // Check for footnote markers
+          const footnoteMatch = displayValue.match(/^(.+?)(\*+)$/);
+          let baseValue = displayValue;
+          let footnoteMarker = '';
           
-          if (!isNaN(numValue)) {
+          if (footnoteMatch) {
+            baseValue = footnoteMatch[1].trim();
+            footnoteMarker = footnoteMatch[2];
+          }
+          
+          // Apply number formatting and alignment
+          const numValue = parseFloat(baseValue.replace(/[^0-9.-]/g, ''));
+          
+          if (!isNaN(numValue) && baseValue.match(/[\d,.$%]/)) {
             // Check if it's currency
-            if (displayValue.includes('$') || cell.numFmt?.includes('$') || cell.numFmt?.includes('¤')) {
-              cellClass += ' currency';
-              if (numValue >= 1000000) {
-                displayValue = '$' + (numValue / 1000000).toFixed(1) + 'M';
-              } else if (numValue >= 1000) {
-                displayValue = '$' + numValue.toLocaleString('en-US', { maximumFractionDigits: 0 });
-              } else {
-                displayValue = '$' + numValue.toLocaleString('en-US');
-              }
+            if (baseValue.includes('$') || cell.numFmt?.includes('$') || cell.numFmt?.includes('¤')) {
+              // For currency, we'll split the dollar sign from the amount
+              cellClass += ' amount';
+              // Show full number, no abbreviation
+              displayValue = '$' + numValue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
             }
             // Check if it's percentage
-            else if (displayValue.includes('%') || cell.numFmt?.includes('%')) {
+            else if (baseValue.includes('%') || cell.numFmt?.includes('%')) {
               cellClass += ' percentage';
               displayValue = numValue.toFixed(1) + '%';
             }
             // Regular number
-            else if (displayValue.match(/^\d+\.?\d*$/)) {
-              cellClass += ' number';
+            else if (baseValue.match(/^\d+\.?\d*$/)) {
+              cellClass += ' amount';
               displayValue = numValue.toLocaleString('en-US');
+            }
+            
+            // Re-add footnote marker if present
+            if (footnoteMarker) {
+              displayValue += footnoteMarker;
             }
           }
 
@@ -264,6 +299,43 @@ app.post('/convert', async (req, res) => {
 
     html += `
         </table>
+    `;
+    
+    // Check if we need to add footnotes
+    const footnotes = [];
+    for (const row of tableData) {
+      for (const cell of row.data) {
+        if (cell.value && cell.value.includes('*')) {
+          const match = cell.value.match(/\*+(.+?)$/);
+          if (match && match[1]) {
+            footnotes.push(match[1].trim());
+          }
+        }
+      }
+    }
+    
+    // Add common footnotes if they appear in the data
+    if (tableData.some(row => row.data.some(cell => cell.value && cell.value.includes('*') && !cell.value.includes('**')))) {
+      if (!footnotes.some(f => f.toLowerCase().includes('estimated'))) {
+        footnotes.unshift('*Estimated');
+      }
+    }
+    if (tableData.some(row => row.data.some(cell => cell.value && cell.value.includes('**')))) {
+      if (!footnotes.some(f => f.toLowerCase().includes('interest reserve'))) {
+        footnotes.push('**12 month Interest Reserve');
+      }
+    }
+    
+    // Add footnotes section if any exist
+    if (footnotes.length > 0) {
+      html += '<div class="footnotes">';
+      for (const footnote of footnotes) {
+        html += `<p>${footnote}</p>`;
+      }
+      html += '</div>';
+    }
+    
+    html += `
       </body>
       </html>
     `;
@@ -278,7 +350,7 @@ app.post('/convert', async (req, res) => {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
       },
       waitUntil: 'networkidle0',
-      selector: 'table'
+      selector: 'body'
     });
 
     // Send image as base64
