@@ -62,52 +62,102 @@ app.post('/convert', async (req, res) => {
     const endCol = columnToNumber(rangeMatch[3]);
     const endRow = parseInt(rangeMatch[4]);
 
-    // Generate HTML table
+    // First pass: analyze table structure to identify section headers and totals
+    const tableData = [];
+    for (let rowNum = startRow; rowNum <= endRow; rowNum++) {
+      const row = worksheet.getRow(rowNum);
+      const rowData = [];
+      
+      for (let colNum = startCol; colNum <= endCol; colNum++) {
+        const cell = row.getCell(colNum);
+        const value = cell.value;
+        let displayValue = '';
+        
+        if (value !== null && value !== undefined) {
+          if (typeof value === 'object' && value.formula) {
+            displayValue = value.result || '';
+          } else {
+            displayValue = value.toString();
+          }
+        }
+        
+        rowData.push({
+          value: displayValue,
+          cell: cell,
+          isEmpty: !displayValue || displayValue.trim() === ''
+        });
+      }
+      
+      tableData.push({
+        rowNum,
+        data: rowData,
+        row: row
+      });
+    }
+
+    // Generate HTML table with Fairbridge styling
     let html = `
       <html>
       <head>
         <style>
           body {
-            font-family: Arial, sans-serif;
+            font-family: 'Calibri', Arial, sans-serif;
             margin: 0;
-            padding: 20px;
+            padding: 10px;
             background-color: white;
           }
           table {
             border-collapse: collapse;
             width: auto;
-            margin: 0 auto;
+            margin: 0;
+            font-size: 10pt;
           }
-          th, td {
-            border: 1px solid #ddd;
-            padding: 8px 12px;
-            text-align: left;
-            font-size: 12px;
+          
+          /* Header row styling */
+          .header-row {
+            background-color: #1F4E79 !important;
+            color: white;
+            font-weight: bold;
+            font-size: 11pt;
           }
-          th {
-            background-color: #f5f5f5;
+          
+          /* Section header styling */
+          .section-header {
+            background-color: #4472C4 !important;
+            color: white;
             font-weight: bold;
           }
-          td {
+          
+          /* Data rows */
+          .data-row-odd {
             background-color: white;
           }
-          .number {
+          
+          .data-row-even {
+            background-color: #F2F2F2;
+          }
+          
+          /* Total rows */
+          .total-row {
+            font-weight: bold;
+            border-top: 2px solid #333 !important;
+          }
+          
+          /* Cell styling */
+          th, td {
+            border: 1px solid #D0D0D0;
+            padding: 6px 12px;
+            text-align: left;
+            vertical-align: middle;
+          }
+          
+          /* Number alignment and formatting */
+          .number, .currency, .percentage {
             text-align: right;
           }
-          .currency {
-            text-align: right;
-          }
-          .percentage {
-            text-align: right;
-          }
+          
           .bold {
             font-weight: bold;
-          }
-          .italic {
-            font-style: italic;
-          }
-          tr:nth-child(even) td {
-            background-color: #fafafa;
           }
         </style>
       </head>
@@ -115,56 +165,97 @@ app.post('/convert', async (req, res) => {
         <table>
     `;
 
-    // Build table from range
-    for (let rowNum = startRow; rowNum <= endRow; rowNum++) {
-      const row = worksheet.getRow(rowNum);
-      html += '<tr>';
+    // Build table from analyzed data
+    let dataRowCounter = 0;
+    
+    for (let i = 0; i < tableData.length; i++) {
+      const rowInfo = tableData[i];
+      const rowNum = rowInfo.rowNum;
+      const rowData = rowInfo.data;
+      
+      // Determine row type and styling
+      let rowClass = '';
+      let isHeader = false;
+      let isSectionHeader = false;
+      let isTotalRow = false;
+      
+      // First row is always header
+      if (i === 0) {
+        isHeader = true;
+        rowClass = 'header-row';
+      } else {
+        // Check if this is a section header (first cell has text, rest are empty)
+        const firstCellValue = rowData[0].value.trim();
+        const restAreEmpty = rowData.slice(1).every(cell => cell.isEmpty);
+        
+        if (firstCellValue && restAreEmpty && 
+            (firstCellValue.toLowerCase().includes('sources') || 
+             firstCellValue.toLowerCase().includes('uses') || 
+             firstCellValue.toLowerCase().includes('costs') || 
+             firstCellValue.toLowerCase().includes('financing'))) {
+          isSectionHeader = true;
+          rowClass = 'section-header';
+        }
+        // Check if this is a total row
+        else if (firstCellValue.toLowerCase().includes('total') || 
+                 rowData.some(cell => cell.cell.style?.font?.bold)) {
+          isTotalRow = true;
+          rowClass = 'total-row';
+        }
+        // Regular data row with alternating colors
+        else {
+          const isEven = dataRowCounter % 2 === 1;
+          rowClass = isEven ? 'data-row-even' : 'data-row-odd';
+          dataRowCounter++;
+        }
+      }
+      
+      html += `<tr class="${rowClass}">`;
       
       for (let colNum = startCol; colNum <= endCol; colNum++) {
-        const cell = row.getCell(colNum);
-        const value = cell.value;
+        const cellIndex = colNum - startCol;
+        const cellInfo = rowData[cellIndex];
+        const cell = cellInfo.cell;
         const style = cell.style || {};
         
         let cellClass = '';
-        let displayValue = '';
+        let displayValue = cellInfo.value;
 
-        if (value !== null && value !== undefined) {
-          // Handle different value types
-          if (typeof value === 'object' && value.formula) {
-            displayValue = value.result || '';
-          } else {
-            displayValue = value.toString();
-          }
-
-          // Apply number formatting
-          if (cell.numFmt) {
-            if (cell.numFmt.includes('$') || cell.numFmt.includes('¤')) {
+        if (displayValue) {
+          // Apply number formatting and alignment
+          const numValue = parseFloat(displayValue.replace(/[^0-9.-]/g, ''));
+          
+          if (!isNaN(numValue)) {
+            // Check if it's currency
+            if (displayValue.includes('$') || cell.numFmt?.includes('$') || cell.numFmt?.includes('¤')) {
               cellClass += ' currency';
-              if (typeof value === 'number') {
-                displayValue = '$' + value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+              if (numValue >= 1000000) {
+                displayValue = '$' + (numValue / 1000000).toFixed(1) + 'M';
+              } else if (numValue >= 1000) {
+                displayValue = '$' + numValue.toLocaleString('en-US', { maximumFractionDigits: 0 });
+              } else {
+                displayValue = '$' + numValue.toLocaleString('en-US');
               }
-            } else if (cell.numFmt.includes('%')) {
+            }
+            // Check if it's percentage
+            else if (displayValue.includes('%') || cell.numFmt?.includes('%')) {
               cellClass += ' percentage';
-              if (typeof value === 'number') {
-                displayValue = (value * 100).toFixed(1) + '%';
-              }
-            } else if (typeof value === 'number') {
+              displayValue = numValue.toFixed(1) + '%';
+            }
+            // Regular number
+            else if (displayValue.match(/^\d+\.?\d*$/)) {
               cellClass += ' number';
-              displayValue = value.toLocaleString('en-US');
+              displayValue = numValue.toLocaleString('en-US');
             }
           }
 
           // Apply text styling
-          if (style.font) {
-            if (style.font.bold) cellClass += ' bold';
-            if (style.font.italic) cellClass += ' italic';
+          if (style.font?.bold || isTotalRow) {
+            cellClass += ' bold';
           }
         }
 
-        // Determine if this is a header cell
-        const isHeader = rowNum === startRow || (style.font && style.font.bold);
         const cellTag = isHeader ? 'th' : 'td';
-        
         html += `<${cellTag}${cellClass ? ' class="' + cellClass.trim() + '"' : ''}>${displayValue}</${cellTag}>`;
       }
       
@@ -177,7 +268,7 @@ app.post('/convert', async (req, res) => {
       </html>
     `;
 
-    // Convert HTML to image
+    // Convert HTML to image with tight cropping
     const image = await nodeHtmlToImage({
       html,
       quality: 100,
@@ -185,7 +276,9 @@ app.post('/convert', async (req, res) => {
       puppeteerArgs: {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
         args: ['--no-sandbox', '--disable-setuid-sandbox']
-      }
+      },
+      waitUntil: 'networkidle0',
+      selector: 'table'
     });
 
     // Send image as base64
