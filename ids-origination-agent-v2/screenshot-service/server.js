@@ -75,9 +75,9 @@ app.post('/convert', async (req, res) => {
         
         if (value !== null && value !== undefined) {
           if (typeof value === 'object' && value.formula) {
-            displayValue = value.result || '';
+            displayValue = String(value.result || '');
           } else {
-            displayValue = value.toString();
+            displayValue = String(value);
           }
         }
         
@@ -185,7 +185,7 @@ app.post('/convert', async (req, res) => {
         rowClass = 'header-row';
       } else {
         // Check if this is a section header (first cell has text, rest are empty)
-        const firstCellValue = rowData[0].value.trim();
+        const firstCellValue = String(rowData[0].value || '').trim();
         const restAreEmpty = rowData.slice(1).every(cell => cell.isEmpty);
         
         if (firstCellValue && restAreEmpty && 
@@ -219,7 +219,7 @@ app.post('/convert', async (req, res) => {
         const style = cell.style || {};
         
         let cellClass = '';
-        let displayValue = cellInfo.value;
+        let displayValue = String(cellInfo.value || '');
 
         if (displayValue) {
           // Apply number formatting and alignment
