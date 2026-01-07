@@ -1,14 +1,11 @@
-# Ignore everything except ids-origination-agent-v2 and template-filler
+# Ignore everything except ids-origination-agent-v2
 *
 !.gitignore
 !ids-origination-agent-v2/
-!template-filler/
 ids-origination-agent-v2/**/*
-template-filler/**/*
 
 # But include ids-origination-agent-v2 files
 !ids-origination-agent-v2/**
-!template-filler/**
 !.gitignore
 
 # Exclude node_modules
