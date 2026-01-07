@@ -95,63 +95,59 @@ app.post('/convert', async (req, res) => {
       });
     }
 
-    // Generate HTML table with Fairbridge styling
+    // Generate HTML table with exact Fairbridge styling
     let html = `
       <html>
       <head>
         <style>
           body {
-            font-family: Arial, 'Calibri', sans-serif;
+            font-family: Arial, Calibri, sans-serif;
             margin: 0;
-            padding: 10px;
+            padding: 20px;
             background-color: white;
           }
           
           table {
             border-collapse: collapse;
-            width: auto;
-            margin: 0;
-            font-size: 11pt;
-            border: 2px solid #999;
+            font-size: 11px;
+            background: white;
           }
           
-          /* Header row styling - only for "Sources" and "Uses" row */
-          .header-row th {
-            background-color: #1F4E79 !important;
-            color: white;
-            font-weight: bold;
-          }
-          
-          /* Section headers - italic and underlined */
-          .section-header td {
-            font-style: italic;
-            text-decoration: underline;
-            font-weight: normal;
-            background-color: white !important;
-          }
-          
-          /* Total rows */
-          .total-row td {
-            font-weight: bold;
-            border-top: 2px solid #666 !important;
-          }
-          
-          .total-row td:first-child {
-            border-top: 2px solid #666 !important;
-          }
-          
-          /* Cell styling */
-          th, td {
-            border: 1px solid #999;
+          /* Remove all borders by default */
+          td, th {
+            border: none;
             padding: 4px 8px;
             text-align: left;
             vertical-align: middle;
             background-color: white;
           }
           
+          /* Header row - navy background */
+          .header-row th {
+            background-color: #1F4E79;
+            color: white;
+            font-weight: bold;
+            text-align: center;
+            border-bottom: 1px solid black;
+          }
+          
+          /* Section headers - italic and underlined */
+          .section-header {
+            font-style: italic;
+            text-decoration: underline;
+            background: white !important;
+            font-weight: normal;
+          }
+          
+          /* Total row - top border only */
+          .total-row td {
+            font-weight: bold;
+            border-top: 1px solid black;
+          }
+          
           /* Dollar sign column */
-          .dollar-sign {
-            text-align: left;
+          .dollar {
+            text-align: right;
             width: 20px;
             padding-right: 2px;
           }
@@ -160,25 +156,25 @@ app.post('/convert', async (req, res) => {
           .amount {
             text-align: right;
             padding-left: 2px;
+            white-space: nowrap;
           }
           
-          /* Percentage column */
-          .percentage {
+          /* Percentage column - blue italic */
+          .percent {
             text-align: right;
             color: #0000FF;
             font-style: italic;
           }
           
-          /* Bold text */
-          .bold {
-            font-weight: bold;
+          /* Label columns */
+          .label {
+            text-align: left;
           }
           
           /* Footnotes */
           .footnotes {
-            margin-top: 10px;
-            font-size: 10pt;
-            font-family: Arial, sans-serif;
+            margin-top: 8px;
+            font-size: 10px;
           }
           
           .footnotes p {
@@ -190,147 +186,145 @@ app.post('/convert', async (req, res) => {
         <table>
     `;
 
-    // Build table from analyzed data
-    let dataRowCounter = 0;
-    
+    // Build table rows
     for (let i = 0; i < tableData.length; i++) {
-      const rowInfo = tableData[i];
-      const rowNum = rowInfo.rowNum;
-      const rowData = rowInfo.data;
+      const rowData = tableData[i].data;
       
-      // Determine row type and styling
-      let rowClass = '';
-      let isHeader = false;
+      // Skip empty rows
+      if (rowData.every(cell => !cell.value || cell.value.trim() === '')) continue;
+      
+      // Get row values
+      const rowValues = rowData.map(cell => String(cell.value || '').trim());
+      const rowTextLower = rowValues.join(' ').toLowerCase();
+      const firstCellLower = rowValues[0].toLowerCase();
+      
+      // Determine row type
+      let isHeaderRow = firstCellLower.includes('sources') && rowTextLower.includes('uses');
+      let isTotalRow = rowTextLower.includes('total');
       let isSectionHeader = false;
-      let isTotalRow = false;
       
-      // Check for header row - "Sources and Uses" or just contains "Sources" in first cell
-      const firstCellValue = String(rowData[0].value || '').trim().toLowerCase();
-      
-      if (firstCellValue.includes('sources') && (firstCellValue.includes('uses') || 
-          rowData.some(cell => String(cell.value || '').toLowerCase().includes('uses')))) {
-        isHeader = true;
-        rowClass = 'header-row';
-      } 
-      // Check if this is a section header (Accretive Costs, Financing Costs, Closing Costs)
-      else if ((firstCellValue.includes('accretive') && firstCellValue.includes('costs')) ||
-               (firstCellValue.includes('financing') && firstCellValue.includes('costs')) ||
-               (firstCellValue.includes('closing') && firstCellValue.includes('costs')) ||
-               firstCellValue === 'costs' ||
-               firstCellValue === 'accretive costs' ||
-               firstCellValue === 'financing costs' ||
-               firstCellValue === 'closing costs') {
-        isSectionHeader = true;
-        rowClass = 'section-header';
-      }
-      // Check if this is a total row
-      else if (firstCellValue.includes('total') || 
-               rowData.some(cell => cell.cell.style?.font?.bold)) {
-        isTotalRow = true;
-        rowClass = 'total-row';
-      }
-      // Regular data row - all white background
-      else {
-        rowClass = 'data-row';
+      // Check for section headers
+      for (const val of rowValues) {
+        const lower = val.toLowerCase();
+        if ((lower.includes('accretive') && lower.includes('costs')) ||
+            (lower.includes('financing') && lower.includes('costs')) ||
+            (lower.includes('closing') && lower.includes('costs'))) {
+          isSectionHeader = true;
+          break;
+        }
       }
       
-      html += `<tr class="${rowClass}">`;
-      
-      for (let colNum = startCol; colNum <= endCol; colNum++) {
-        const cellIndex = colNum - startCol;
-        const cellInfo = rowData[cellIndex];
-        const cell = cellInfo.cell;
-        const style = cell.style || {};
-        
-        let cellClass = '';
-        let displayValue = String(cellInfo.value || '');
-
-        if (displayValue) {
-          // Check for footnote markers
-          const footnoteMatch = displayValue.match(/^(.+?)(\*+)$/);
-          let baseValue = displayValue;
-          let footnoteMarker = '';
-          
-          if (footnoteMatch) {
-            baseValue = footnoteMatch[1].trim();
-            footnoteMarker = footnoteMatch[2];
-          }
-          
-          // Apply number formatting and alignment
-          const numValue = parseFloat(baseValue.replace(/[^0-9.-]/g, ''));
-          
-          if (!isNaN(numValue) && baseValue.match(/[\d,.$%]/)) {
-            // Check if it's currency
-            if (baseValue.includes('$') || cell.numFmt?.includes('$') || cell.numFmt?.includes('¤')) {
-              // For currency, we'll split the dollar sign from the amount
-              cellClass += ' amount';
-              // Show full number, no abbreviation
-              displayValue = '$' + numValue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-            }
-            // Check if it's percentage
-            else if (baseValue.includes('%') || cell.numFmt?.includes('%')) {
-              cellClass += ' percentage';
-              displayValue = numValue.toFixed(1) + '%';
-            }
-            // Regular number
-            else if (baseValue.match(/^\d+\.?\d*$/)) {
-              cellClass += ' amount';
-              displayValue = numValue.toLocaleString('en-US');
-            }
-            
-            // Re-add footnote marker if present
-            if (footnoteMarker) {
-              displayValue += footnoteMarker;
-            }
-          }
-
-          // Apply text styling
-          if (style.font?.bold || isTotalRow) {
-            cellClass += ' bold';
+      // Build row
+      if (isHeaderRow) {
+        // Header row
+        html += '<tr class="header-row">';
+        let usesIndex = -1;
+        for (let j = 0; j < rowValues.length; j++) {
+          if (rowValues[j].toLowerCase().includes('uses')) {
+            usesIndex = j;
+            break;
           }
         }
-
-        const cellTag = isHeader ? 'th' : 'td';
-        html += `<${cellTag}${cellClass ? ' class="' + cellClass.trim() + '"' : ''}>${displayValue}</${cellTag}>`;
+        if (usesIndex === -1) usesIndex = Math.floor(rowValues.length / 2);
+        
+        html += `<th colspan="${usesIndex * 3}">Sources</th>`;
+        html += `<th colspan="${(rowValues.length - usesIndex) * 3}">Uses</th>`;
+        html += '</tr>';
+      } else {
+        // Data row
+        html += `<tr${isTotalRow ? ' class="total-row"' : ''}>`;
+        
+        // Process each cell
+        for (let j = 0; j < rowValues.length; j++) {
+          const cellValue = rowValues[j];
+          const cellData = rowData[j];
+          
+          if (!cellValue) {
+            html += '<td></td>';
+            continue;
+          }
+          
+          // Extract footnotes
+          const footnoteMatch = cellValue.match(/^(.+?)(\*+)$/);
+          let baseValue = cellValue;
+          let footnote = '';
+          if (footnoteMatch) {
+            baseValue = footnoteMatch[1].trim();
+            footnote = footnoteMatch[2];
+          }
+          
+          // Check if section header cell
+          if (isSectionHeader) {
+            const lower = cellValue.toLowerCase();
+            if ((lower.includes('accretive') && lower.includes('costs')) ||
+                (lower.includes('financing') && lower.includes('costs')) ||
+                (lower.includes('closing') && lower.includes('costs'))) {
+              html += `<td colspan="2" class="section-header">${cellValue}</td>`;
+              continue;
+            }
+          }
+          
+          // Check cell content type
+          const currencyMatch = baseValue.match(/^\$?\s*([\d,]+(?:\.\d+)?)$/);
+          const percentMatch = baseValue.match(/^([\d.]+)\s*%$/);
+          
+          if (currencyMatch && !isSectionHeader) {
+            // Currency value
+            const numValue = parseFloat(currencyMatch[1].replace(/,/g, ''));
+            html += '<td class="dollar">$</td>';
+            html += `<td class="amount">${numValue.toLocaleString('en-US', {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0
+            })}${footnote}</td>`;
+          } else if (percentMatch) {
+            // Percentage value  
+            const numValue = parseFloat(percentMatch[1]);
+            html += '<td></td>'; // Empty cell for dollar sign column
+            html += `<td class="percent">${numValue.toFixed(2)}%</td>`;
+          } else {
+            // Text label
+            html += `<td class="label" colspan="2">${cellValue}</td>`;
+          }
+        }
+        
+        html += '</tr>';
       }
-      
-      html += '</tr>';
     }
 
     html += `
         </table>
     `;
     
-    // Check if we need to add footnotes
-    const footnotes = [];
+    // Check for footnotes in the data
+    let hasSingleAsterisk = false;
+    let hasDoubleAsterisk = false;
+    let interestReserveMonths = '';
+    
     for (const row of tableData) {
       for (const cell of row.data) {
-        if (cell.value && cell.value.includes('*')) {
-          const match = cell.value.match(/\*+(.+?)$/);
-          if (match && match[1]) {
-            footnotes.push(match[1].trim());
+        const value = String(cell.value || '');
+        if (value.includes('**') && value.toLowerCase().includes('interest reserve')) {
+          hasDoubleAsterisk = true;
+          // Try to extract month count
+          const monthMatch = value.match(/(\d+)\s*month/i);
+          if (monthMatch) {
+            interestReserveMonths = monthMatch[1];
           }
+        } else if (value.includes('*') && !value.includes('**')) {
+          hasSingleAsterisk = true;
         }
       }
     }
     
-    // Add common footnotes if they appear in the data
-    if (tableData.some(row => row.data.some(cell => cell.value && cell.value.includes('*') && !cell.value.includes('**')))) {
-      if (!footnotes.some(f => f.toLowerCase().includes('estimated'))) {
-        footnotes.unshift('*Estimated');
-      }
-    }
-    if (tableData.some(row => row.data.some(cell => cell.value && cell.value.includes('**')))) {
-      if (!footnotes.some(f => f.toLowerCase().includes('interest reserve'))) {
-        footnotes.push('**12 month Interest Reserve');
-      }
-    }
-    
-    // Add footnotes section if any exist
-    if (footnotes.length > 0) {
+    // Add footnotes section if asterisks were found
+    if (hasSingleAsterisk || hasDoubleAsterisk) {
       html += '<div class="footnotes">';
-      for (const footnote of footnotes) {
-        html += `<p>${footnote}</p>`;
+      if (hasSingleAsterisk) {
+        html += '<p>*Estimated</p>';
+      }
+      if (hasDoubleAsterisk) {
+        const months = interestReserveMonths || '24';
+        html += `<p>**${months} month Interest Reserve</p>`;
       }
       html += '</div>';
     }
