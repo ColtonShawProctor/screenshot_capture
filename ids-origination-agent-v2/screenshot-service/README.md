@@ -9,6 +9,8 @@ A microservice that converts Excel spreadsheet ranges into PNG screenshots for t
 - Preserves formatting (bold, italic, currency, percentages)
 - Case-insensitive sheet name matching
 - Fuzzy matching for table names
+- Input validation (base64 format and Excel file signature checking)
+- Enhanced error messages with helpful hints
 - Handles large Excel files via base64 encoding
 - Health check endpoint for monitoring
 
@@ -95,12 +97,13 @@ The service recognizes these common table types in Fairbridge S&U Excel files:
 
 | Table Name | Common Variations | Typical Location |
 |------------|-------------------|------------------|
-| Sources and Uses | "Sources & Uses", "Source and Use" | S&U sheet |
-| Take Out Loan Sizing | "Takeout Loan Sizing", "Loan Sizing" | S&U sheet |
-| Capital Stack at Closing | "Capital Stack", "Cap Stack" | S&U sheet |
-| Loan to Cost | "LTC", "Loan-to-Cost" | LTC and LTV Calcs sheet |
-| Loan to Value | "LTV", "Loan-to-Value" | LTC and LTV Calcs sheet |
-| PILOT Schedule | "PILOT", "Payment in Lieu of Taxes" | Various sheets |
+| Sources and Uses | "Sources & Uses", "Source and Use", "Sources/Uses" | S&U sheet |
+| Take Out Loan Sizing | "Takeout Loan Sizing", "Loan Sizing", "Takeout Sizing" | S&U sheet |
+| Capital Stack at Closing | "Capital Stack", "Cap Stack", "Capital Stack Closing" | S&U sheet |
+| Loan to Cost | "LTC", "Loan-to-Cost", "Loan Cost", "LTC Analysis" | LTC and LTV Calcs sheet |
+| Loan to Value | "LTV", "Loan-to-Value", "Loan Value", "LTV Analysis" | LTC and LTV Calcs sheet |
+| LTC and LTV | "LTC and LTV", "LTV and LTC", "LTC & LTV", "LTC/LTV" | LTC and LTV Calcs sheet |
+| PILOT Schedule | "PILOT", "Payment in Lieu of Taxes", "P.I.L.O.T", "Pilot Payment" | Various sheets |
 | Occupancy | "Unit Mix", "Occupancy Schedule" | Summary/I&E sheet |
 
 ## Local Development
@@ -133,6 +136,24 @@ curl -X POST http://localhost:3000/detect-and-capture \
   }'
 ```
 
+## Input Validation
+
+The service validates all inputs to ensure data integrity:
+
+- **Base64 Format**: Validates that `excelBase64` is properly formatted base64 data
+- **Excel File Signature**: Checks for valid Excel file format (ZIP header signature)
+- **Error Messages**: Provides descriptive error messages with hints when validation fails
+
+Example error response:
+```json
+{
+  "error": "Invalid Excel file. The provided base64 data does not appear to be a valid Excel file.",
+  "hint": "Make sure you are sending the actual base64-encoded content of an Excel file (.xlsx)"
+}
+```
+
 ## Deployment on Coolify
 
 This service is deployed as a Docker container on Coolify. See main project README for deployment instructions.
+
+**Note:** The Dockerfile includes `tableDetector.js` in the build to support the `/detect-and-capture` endpoint.
