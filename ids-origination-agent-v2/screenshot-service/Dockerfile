@@ -8,8 +8,12 @@ RUN apt-get update && apt-get install -y \
     fonts-noto-cjk \
     curl \
     imagemagick \
+    poppler-utils \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
+
+# Configure ImageMagick to allow PDF processing
+RUN sed -i 's/policy domain="coder" rights="none" pattern="PDF"/policy domain="coder" rights="read|write" pattern="PDF"/g' /etc/ImageMagick-6/policy.xml
 
 # Set Puppeteer to use installed Chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium

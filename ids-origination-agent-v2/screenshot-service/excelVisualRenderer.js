@@ -101,6 +101,27 @@ class ExcelVisualRenderer {
    * Convert PDF to PNG with high quality settings
    */
   async convertPDFtoPNG(pdfFile, pngFile) {
+    // Try ImageMagick first (preferred for quality)
+    try {
+      await this.convertPDFtoPNG_ImageMagick(pdfFile, pngFile);
+      return;
+    } catch (error) {
+      console.warn('ImageMagick failed, trying poppler fallback:', error.message);
+    }
+    
+    // Fallback to poppler-utils (pdftoppm)
+    try {
+      await this.convertPDFtoPNG_Poppler(pdfFile, pngFile);
+      return;
+    } catch (error) {
+      throw new Error(`Both ImageMagick and poppler failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Convert PDF to PNG using ImageMagick
+   */
+  async convertPDFtoPNG_ImageMagick(pdfFile, pngFile) {
     // Use ImageMagick to convert PDF to PNG with high quality
     // -density 300: High DPI for crisp text
     // -quality 95: High quality
@@ -109,7 +130,7 @@ class ExcelVisualRenderer {
     // [0]: Take first page only
     const convertCmd = `convert -density 300 -quality 95 -background white -alpha remove "${pdfFile}[0]" "${pngFile}"`;
     
-    console.log('Converting PDF to PNG:', convertCmd);
+    console.log('Converting PDF to PNG with ImageMagick:', convertCmd);
     const { stdout, stderr } = await execAsync(convertCmd);
     
     if (stderr && !stderr.includes('Warning')) {
@@ -120,7 +141,41 @@ class ExcelVisualRenderer {
       throw new Error('ImageMagick failed to generate PNG');
     }
 
-    console.log('Successfully converted PDF to PNG');
+    console.log('Successfully converted PDF to PNG with ImageMagick');
+  }
+
+  /**
+   * Convert PDF to PNG using poppler-utils (fallback)
+   */
+  async convertPDFtoPNG_Poppler(pdfFile, pngFile) {
+    // Use pdftoppm from poppler-utils as fallback
+    // -png: Output PNG format
+    // -r 300: 300 DPI resolution
+    // -f 1 -l 1: First page only
+    // -singlefile: Single output file
+    const baseName = path.basename(pngFile, '.png');
+    const outputDir = path.dirname(pngFile);
+    const convertCmd = `pdftoppm -png -r 300 -f 1 -l 1 -singlefile "${pdfFile}" "${outputDir}/${baseName}"`;
+    
+    console.log('Converting PDF to PNG with poppler:', convertCmd);
+    const { stdout, stderr } = await execAsync(convertCmd);
+    
+    if (stderr) {
+      console.warn('pdftoppm stderr:', stderr);
+    }
+
+    // pdftoppm creates filename with .png extension automatically
+    const popplerOutput = `${outputDir}/${baseName}.png`;
+    if (!fs.existsSync(popplerOutput)) {
+      throw new Error('pdftoppm failed to generate PNG');
+    }
+
+    // Move to expected location if different
+    if (popplerOutput !== pngFile) {
+      fs.renameSync(popplerOutput, pngFile);
+    }
+
+    console.log('Successfully converted PDF to PNG with poppler');
   }
 
   /**
