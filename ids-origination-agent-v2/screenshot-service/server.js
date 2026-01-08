@@ -24,8 +24,33 @@ app.post('/convert', async (req, res) => {
       return res.status(400).json({ error: 'Missing required parameters: excelBase64, sheetName, range' });
     }
 
+    // Validate base64 format
+    const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/;
+    if (!base64Pattern.test(excelBase64)) {
+      return res.status(400).json({
+        error: 'Invalid excelBase64 format. Must be valid base64-encoded Excel file data.',
+        received: typeof excelBase64 === 'string' ? excelBase64.substring(0, 50) + '...' : typeof excelBase64
+      });
+    }
+
     // Convert base64 to buffer
-    const buffer = Buffer.from(excelBase64, 'base64');
+    let buffer;
+    try {
+      buffer = Buffer.from(excelBase64, 'base64');
+      
+      // Basic check for Excel file signature (ZIP header)
+      if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50) {
+        return res.status(400).json({
+          error: 'Invalid Excel file. The provided base64 data does not appear to be a valid Excel file.',
+          hint: 'Make sure you are sending the actual base64-encoded content of an Excel file (.xlsx)'
+        });
+      }
+    } catch (err) {
+      return res.status(400).json({
+        error: 'Failed to decode base64 data',
+        details: err.message
+      });
+    }
 
     // Load workbook
     const workbook = new ExcelJS.Workbook();
@@ -377,8 +402,33 @@ app.post('/detect-and-capture', async (req, res) => {
       });
     }
 
+    // Validate base64 format
+    const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/;
+    if (!base64Pattern.test(excelBase64)) {
+      return res.status(400).json({
+        error: 'Invalid excelBase64 format. Must be valid base64-encoded Excel file data.',
+        received: typeof excelBase64 === 'string' ? excelBase64.substring(0, 50) + '...' : typeof excelBase64
+      });
+    }
+
     // Convert base64 to buffer
-    const buffer = Buffer.from(excelBase64, 'base64');
+    let buffer;
+    try {
+      buffer = Buffer.from(excelBase64, 'base64');
+      
+      // Basic check for Excel file signature (ZIP header)
+      if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50) {
+        return res.status(400).json({
+          error: 'Invalid Excel file. The provided base64 data does not appear to be a valid Excel file.',
+          hint: 'Make sure you are sending the actual base64-encoded content of an Excel file (.xlsx)'
+        });
+      }
+    } catch (err) {
+      return res.status(400).json({
+        error: 'Failed to decode base64 data',
+        details: err.message
+      });
+    }
 
     // Load workbook
     const workbook = new ExcelJS.Workbook();
