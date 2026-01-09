@@ -1,39 +1,29 @@
-FROM node:20-slim
+FROM ubuntu:22.04
 
-# Install LibreOffice, Python, and other tools for Excel range extraction
+# Install LibreOffice with UNO, Python, and fonts
 RUN apt-get update && apt-get install -y \
     libreoffice-calc \
-    python3 \
-    python3-openpyxl \
-    poppler-utils \
+    libreoffice-writer \
+    python3-uno \
+    python3-pip \
     fonts-liberation \
-    fonts-noto-cjk \
+    fonts-dejavu \
     curl \
-    --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Remove old ImageMagick and Chromium configs (no longer needed)
-# The new Python-based approach uses LibreOffice + poppler only
+# Install Node.js for the HTTP service wrapper
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y nodejs
 
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
-RUN npm install --omit=dev
-
-# Copy application files
-COPY server.js ./
-COPY tableDetector.js ./
-COPY excelVisualRenderer.js ./
-COPY extract_table.py ./
-
-# Make Python script executable  
-RUN chmod +x extract_table.py
+RUN npm install
+COPY . .
 
 # Expose port
 EXPOSE 3000
 
-# Run server
-CMD ["node", "server.js"]
+# Start LibreOffice listener in background, then Node server
+CMD soffice --headless --accept="socket,host=localhost,port=2002;urp;StarOffice.ServiceManager" & \
+    sleep 3 && \
+    node server.js

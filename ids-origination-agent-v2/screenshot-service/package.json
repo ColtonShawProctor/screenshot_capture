@@ -1,7 +1,7 @@
 {
   "name": "excel-screenshot-service",
-  "version": "1.0.0",
-  "description": "Excel to PNG screenshot service for IDS Origination Agent",
+  "version": "2.0.0",
+  "description": "Excel to PNG screenshot service using LibreOffice UNO API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,11 +9,9 @@
   "author": "Fairbridge Commercial Lending",
   "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
-    "exceljs": "^4.4.0",
-    "node-html-to-image": "^4.0.0"
+    "express": "^4.18.2"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=18.0.0"
   }
 }
