@@ -92,14 +92,19 @@ function captureTable(excelBase64, tableName) {
         python.stdin.write(JSON.stringify({ excelBase64, tableName }));
         python.stdin.end();
         
-        python.stdout.on('data', (data) => { stdout += data; });
-        python.stderr.on('data', (data) => { stderr += data; });
+        python.stdout.on('data', (data) => { 
+            stdout += data; 
+            console.log(`STDOUT: ${data}`);
+        });
+        python.stderr.on('data', (data) => { 
+            stderr += data;
+            console.log(`STDERR: ${data}`);  // LOG IT IMMEDIATELY
+        });
         
         python.on('close', (code) => {
-            // LOG THE STDERR
-            if (stderr) {
-                console.error(`Python stderr: ${stderr}`);
-            }
+            console.log(`Python exited with code ${code}`);
+            console.log(`Full stdout: ${stdout}`);
+            console.log(`Full stderr: ${stderr}`);
             
             if (code === 0 && stdout) {
                 try {
@@ -108,7 +113,7 @@ function captureTable(excelBase64, tableName) {
                     reject(new Error(`Invalid JSON: ${stdout}`));
                 }
             } else {
-                reject(new Error(stderr || `Exit code ${code}`));
+                reject(new Error(stderr || stdout || `Exit code ${code}`));
             }
         });
         
