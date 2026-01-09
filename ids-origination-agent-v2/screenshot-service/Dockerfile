@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     iproute2 \
     poppler-utils \
+    imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js for the HTTP service wrapper

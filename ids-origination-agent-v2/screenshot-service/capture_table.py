@@ -95,7 +95,7 @@ def expand_to_table(sheet, header_cell, table_name):
         'Sources and Uses': 7,
         'Take Out Loan Sizing': 3,  # J, K, L columns
         'Capital Stack at Closing': 7,
-        'Loan to Cost': 7,
+        'Loan to Cost': 8,  # Was 7, increased
         'Loan to Value': 7,
         'PILOT Schedule': 8,
     }
@@ -211,6 +211,11 @@ def export_range_as_image(doc, sheet, table_range, output_path):
     actual_png = png_base + '.png'
     if actual_png != output_path:
         os.rename(actual_png, output_path)
+    
+    # Trim whitespace using ImageMagick
+    subprocess.run([
+        'convert', output_path, '-trim', '+repage', output_path
+    ], check=True, capture_output=True)
     
     # Cleanup PDF
     if os.path.exists(pdf_path):
