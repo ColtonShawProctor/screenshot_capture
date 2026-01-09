@@ -1,23 +1,22 @@
 FROM node:20-slim
 
-# Install LibreOffice, Chromium and fonts for Excel visual rendering
+# Install LibreOffice, Python, and other tools for Excel range extraction
 RUN apt-get update && apt-get install -y \
-    libreoffice \
-    chromium \
+    libreoffice-calc \
+    python3 \
+    python3-pip \
+    poppler-utils \
     fonts-liberation \
     fonts-noto-cjk \
     curl \
-    imagemagick \
-    poppler-utils \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-# Configure ImageMagick to allow PDF processing
-RUN sed -i 's/policy domain="coder" rights="none" pattern="PDF"/policy domain="coder" rights="read|write" pattern="PDF"/g' /etc/ImageMagick-6/policy.xml
+# Install Python dependencies
+RUN pip3 install openpyxl
 
-# Set Puppeteer to use installed Chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# Remove old ImageMagick and Chromium configs (no longer needed)
+# The new Python-based approach uses LibreOffice + poppler only
 
 WORKDIR /app
 
@@ -28,7 +27,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 # Copy application files
-COPY server.js tableDetector.js excelVisualRenderer.js ./
+COPY server.js tableDetector.js excelVisualRenderer.js extract_table.py ./
 
 # Expose port
 EXPOSE 3000

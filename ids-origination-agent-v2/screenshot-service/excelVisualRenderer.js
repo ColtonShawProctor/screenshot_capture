@@ -1,398 +1,221 @@
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-
-const execAsync = promisify(exec);
+const { spawn } = require('child_process');
 
 /**
- * LibreOffice-based Excel renderer - much simpler and more reliable
- * Uses LibreOffice's native Excel rendering, then crops to table ranges
+ * Python-based Excel renderer using openpyxl for perfect range extraction
+ * 
+ * This approach is fundamentally more reliable than PDF cropping:
+ * 1. Extract only the target range from source Excel (with all formatting)
+ * 2. Create new workbook containing just that range 
+ * 3. Render new workbook - entire image IS the table
+ * 4. No cropping needed!
  */
 class ExcelVisualRenderer {
   constructor() {
-    this.tempDir = '/tmp/excel-renderer';
-    this.ensureTempDir();
+    this.pythonScript = path.join(__dirname, 'extract_table.py');
+    this.ensurePythonScript();
   }
 
-  ensureTempDir() {
-    if (!fs.existsSync(this.tempDir)) {
-      fs.mkdirSync(this.tempDir, { recursive: true });
+  ensurePythonScript() {
+    if (!fs.existsSync(this.pythonScript)) {
+      throw new Error(`Python script not found: ${this.pythonScript}`);
     }
   }
 
   /**
-   * Render Excel range to PNG using LibreOffice native rendering + cropping
+   * Render Excel range to PNG using Python openpyxl extraction
    * @param {Buffer} excelBuffer - Excel file buffer
-   * @param {string} sheetName - Sheet name 
-   * @param {string} range - Excel range (e.g., "A1:H30")
-   * @param {string} filename - Output filename
+   * @param {string} sheetName - Sheet name (e.g., "S&U ")
+   * @param {string} range - Excel range (e.g., "A6:N27") 
+   * @param {string} filename - Output filename (unused, kept for compatibility)
    * @returns {Promise<Buffer>} - PNG image buffer
    */
   async renderExcelRange(excelBuffer, sheetName, range, filename = 'screenshot.png') {
-    const timestamp = Date.now();
-    const inputFile = path.join(this.tempDir, `input_${timestamp}.xlsx`);
-    const pdfFile = path.join(this.tempDir, `output_${timestamp}.pdf`);
-    const pngFile = path.join(this.tempDir, `page_${timestamp}.png`);
-    const croppedFile = path.join(this.tempDir, `cropped_${timestamp}.png`);
-
     try {
-      // Step 1: Save Excel buffer to temporary file
-      fs.writeFileSync(inputFile, excelBuffer);
-
-      // Step 2: Get sheet index to determine which PDF page to extract
-      const sheetIndex = await this.getSheetIndex(excelBuffer, sheetName);
-      console.log(`Target sheet '${sheetName}' is at index ${sheetIndex}`);
-
-      // Step 3: Convert Excel to PDF using LibreOffice (preserves ALL formatting)
-      await this.convertExcelToPDF(inputFile, pdfFile, sheetName);
-
-      // Step 4: Convert specific PDF page to PNG (the target sheet)
-      await this.convertPDFtoPNG(pdfFile, pngFile, timestamp, sheetIndex + 1);
-
-      // Step 5: Crop PNG to table range
-      let finalFile = pngFile;
+      console.log(`Extracting and rendering ${sheetName}!${range} using Python openpyxl...`);
       
-      if (range && range !== 'all') {
-        console.log(`Cropping image to range ${range}...`);
-        await this.cropImageToRange(pngFile, croppedFile, range, sheetName);
-        finalFile = croppedFile;
+      // Convert buffer to base64 for Python script
+      const excelBase64 = excelBuffer.toString('base64');
+      
+      // Call Python script
+      const result = await this.callPythonExtractor({
+        excelBase64,
+        sheetName,
+        cellRange: range
+      });
+      
+      if (!result.success) {
+        throw new Error(result.error);
       }
-
-      // Step 6: Read and return PNG buffer
-      if (!fs.existsSync(finalFile)) {
-        throw new Error(`Final output file not found: ${finalFile}`);
-      }
-
-      const pngBuffer = fs.readFileSync(finalFile);
-
-      // Cleanup temporary files
-      this.cleanup([inputFile, pdfFile, pngFile, croppedFile]);
-
-      return pngBuffer;
-
+      
+      console.log(`✅ Successfully extracted table from ${result.source_sheet} using Python openpyxl`);
+      
+      // Convert base64 image back to buffer
+      return Buffer.from(result.image, 'base64');
+      
     } catch (error) {
-      // Cleanup on error
-      this.cleanup([inputFile, pdfFile, pngFile, croppedFile]);
-      throw new Error(`Excel visual rendering failed: ${error.message}`);
+      throw new Error(`Python extraction failed: ${error.message}`);
     }
   }
 
   /**
-   * Convert Excel to PDF using LibreOffice - with sheet selection
-   * LibreOffice handles all Excel complexity: merges, formatting, number formats, etc.
+   * Call Python extractor script
+   * @param {object} input - Input data for Python script
+   * @returns {Promise<object>} - Result from Python script
    */
-  async convertExcelToPDF(inputFile, outputFile, sheetName = null) {
-    const outputDir = path.dirname(outputFile);
-    
-    try {
-      let convertCmd;
+  async callPythonExtractor(input) {
+    return new Promise((resolve, reject) => {
+      const python = spawn('python3', [this.pythonScript], {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
       
-      if (sheetName) {
-        // Create a macro to set the active sheet before export
-        const macroContent = `
-Sub SetActiveSheetAndExport
-  Dim oDoc As Object
-  Dim oSheets As Object
-  Dim oSheet As Object
-  
-  oDoc = ThisComponent
-  oSheets = oDoc.getSheets()
-  
-  ' Find and activate the target sheet
-  For i = 0 To oSheets.getCount() - 1
-    oSheet = oSheets.getByIndex(i)
-    If oSheet.getName() = "${sheetName}" Then
-      oDoc.getCurrentController().setActiveSheet(oSheet)
-      Exit For
-    End If
-  Next i
-  
-  ' Set print area to the active sheet only
-  oSheet = oDoc.getCurrentController().getActiveSheet()
-  oDoc.getCurrentController().setActiveSheet(oSheet)
-  
-End Sub
-`;
+      let stdout = '';
+      let stderr = '';
+      
+      // Send input as JSON
+      python.stdin.write(JSON.stringify(input));
+      python.stdin.end();
+      
+      // Collect output
+      python.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+      
+      python.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+      
+      // Handle completion
+      python.on('close', (code) => {
+        if (stderr) {
+          console.log('Python script stderr:', stderr);
+        }
         
-        // For now, use a simpler approach: convert all sheets but we'll extract the right page later
-        convertCmd = `soffice --headless --convert-to pdf --outdir "${outputDir}" "${inputFile}"`;
-        console.log(`Converting Excel to PDF (will extract sheet '${sheetName}' later):`, convertCmd);
-      } else {
-        // Convert entire workbook
-        convertCmd = `soffice --headless --convert-to pdf --outdir "${outputDir}" "${inputFile}"`;
-        console.log('Converting Excel to PDF with LibreOffice:', convertCmd);
-      }
-      
-      const { stdout, stderr } = await execAsync(convertCmd, { timeout: 30000 });
-      
-      if (stderr && !stderr.includes('Warning')) {
-        console.warn('LibreOffice stderr:', stderr);
-      }
-
-      // LibreOffice creates PDF with same base name as input
-      const baseName = path.basename(inputFile, path.extname(inputFile));
-      const generatedPdf = path.join(outputDir, `${baseName}.pdf`);
-      
-      // Move to expected output location if needed
-      if (fs.existsSync(generatedPdf) && generatedPdf !== outputFile) {
-        fs.renameSync(generatedPdf, outputFile);
-      }
-
-      if (!fs.existsSync(outputFile)) {
-        throw new Error('LibreOffice failed to generate PDF');
-      }
-
-      console.log('✅ Successfully converted Excel to PDF with LibreOffice');
-      
-    } catch (error) {
-      if (error.message.includes('soffice')) {
-        throw new Error('LibreOffice (soffice) not found. Install with: apt-get install libreoffice-calc');
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Get the index of a sheet within the Excel workbook
-   */
-  async getSheetIndex(excelBuffer, targetSheetName) {
-    const ExcelJS = require('exceljs');
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(excelBuffer);
-
-    let sheetIndex = 0;
-    let found = false;
-    
-    workbook.eachSheet((sheet, index) => {
-      const sheetName = sheet.name.trim();
-      const targetName = targetSheetName.trim();
-      
-      if (sheetName.toLowerCase() === targetName.toLowerCase()) {
-        sheetIndex = index - 1; // ExcelJS is 1-based, we need 0-based
-        found = true;
-      }
-    });
-
-    if (!found) {
-      // Try partial match
-      workbook.eachSheet((sheet, index) => {
-        const sheetName = sheet.name.trim();
-        const targetName = targetSheetName.trim();
-        
-        if (sheetName.toLowerCase().includes(targetName.toLowerCase()) || 
-            targetName.toLowerCase().includes(sheetName.toLowerCase())) {
-          sheetIndex = index - 1;
-          found = true;
+        if (code === 0) {
+          try {
+            const result = JSON.parse(stdout);
+            resolve(result);
+          } catch (err) {
+            reject(new Error(`Failed to parse Python output: ${err.message}`));
+          }
+        } else {
+          reject(new Error(`Python script exited with code ${code}: ${stderr}`));
         }
       });
-    }
-
-    if (!found) {
-      throw new Error(`Sheet '${targetSheetName}' not found in workbook`);
-    }
-
-    return sheetIndex;
-  }
-
-  /**
-   * Convert PDF to PNG using poppler-utils (more reliable than ImageMagick)
-   */
-  async convertPDFtoPNG(pdfFile, outputTemplate, timestamp, pageNumber = 1) {
-    try {
-      // Use pdftoppm to convert PDF to PNG with high quality
-      // -png: PNG format
-      // -r 150: 150 DPI (good quality, reasonable file size)
-      // -f X -l X: Extract specific page (pageNumber)
-      // -singlefile: Single output file
-      const baseName = `page_${timestamp}`;
-      const outputDir = path.dirname(outputTemplate);
-      const convertCmd = `pdftoppm -png -r 150 -f ${pageNumber} -l ${pageNumber} -singlefile "${pdfFile}" "${outputDir}/${baseName}"`;
       
-      console.log(`Converting PDF page ${pageNumber} to PNG with poppler:`, convertCmd);
-      const { stdout, stderr } = await execAsync(convertCmd, { timeout: 15000 });
+      // Handle errors
+      python.on('error', (err) => {
+        reject(new Error(`Failed to spawn Python process: ${err.message}`));
+      });
       
-      if (stderr && stderr.trim()) {
-        console.warn('pdftoppm stderr:', stderr);
-      }
-
-      // pdftoppm with -singlefile creates filename with .png (no -1 suffix)
-      const popplerOutput = `${outputDir}/${baseName}.png`;
-      if (!fs.existsSync(popplerOutput)) {
-        throw new Error(`pdftoppm failed to generate PNG for page ${pageNumber}`);
-      }
-
-      console.log(`✅ Successfully converted PDF page ${pageNumber} to PNG with poppler`);
-      return popplerOutput;
+      // Set timeout
+      const timeout = setTimeout(() => {
+        python.kill();
+        reject(new Error('Python script timed out after 60 seconds'));
+      }, 60000);
       
-    } catch (error) {
-      // Fallback to ImageMagick if poppler fails
-      console.warn('Poppler failed, trying ImageMagick fallback:', error.message);
-      await this.convertPDFtoPNG_ImageMagick(pdfFile, outputTemplate);
-    }
-  }
-
-  /**
-   * ImageMagick fallback for PDF to PNG conversion
-   */
-  async convertPDFtoPNG_ImageMagick(pdfFile, pngFile) {
-    try {
-      // Use ImageMagick as fallback
-      const convertCmd = `convert -density 150 -quality 95 -background white -alpha remove "${pdfFile}[0]" "${pngFile}"`;
-      
-      console.log('Converting PDF to PNG with ImageMagick (fallback)...');
-      const { stdout, stderr } = await execAsync(convertCmd, { timeout: 15000 });
-      
-      // Check for PDF policy error
-      if (stderr && stderr.includes('not authorized') && stderr.includes('PDF')) {
-        throw new Error('ImageMagick PDF policy restriction. Install poppler-utils: apt-get install poppler-utils');
-      }
-      
-      if (!fs.existsSync(pngFile)) {
-        throw new Error('ImageMagick failed to generate PNG');
-      }
-
-      console.log('✅ Successfully converted PDF to PNG with ImageMagick');
-      
-    } catch (error) {
-      throw new Error(`Both poppler and ImageMagick failed: ${error.message}`);
-    }
-  }
-
-  /**
-   * Crop image to specific table range using sharp
-   * Calculates pixel coordinates from Excel cell positions
-   */
-  async cropImageToRange(inputPng, outputPng, range, sheetName) {
-    const sharp = require('sharp');
-    
-    try {
-      // Parse range (e.g., "A6:N27")
-      const rangeMatch = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
-      if (!rangeMatch) {
-        throw new Error(`Invalid range format: ${range}. Expected format like "A6:N27"`);
-      }
-      
-      const [, startCol, startRow, endCol, endRow] = rangeMatch;
-      const startColNum = this.columnToNumber(startCol);
-      const endColNum = this.columnToNumber(endCol);
-      const startRowNum = parseInt(startRow, 10);
-      const endRowNum = parseInt(endRow, 10);
-      
-      console.log(`Cropping range ${startCol}${startRow}:${endCol}${endRow} (cols ${startColNum}-${endColNum}, rows ${startRowNum}-${endRowNum})`);
-      
-      // Get image dimensions
-      const image = sharp(inputPng);
-      const { width, height } = await image.metadata();
-      
-      // Estimate cell dimensions (typical LibreOffice/Excel rendering)
-      // These are approximate values that work well for most Excel exports
-      const averageColWidth = 64;   // pixels per column (can vary)
-      const averageRowHeight = 20;  // pixels per row (more consistent)
-      const headerMargin = 40;      // top margin for sheet headers
-      const leftMargin = 50;        // left margin for row numbers
-      
-      // Calculate crop coordinates
-      const left = Math.max(0, leftMargin + (startColNum - 1) * averageColWidth);
-      const top = Math.max(0, headerMargin + (startRowNum - 1) * averageRowHeight);
-      const right = Math.min(width, leftMargin + endColNum * averageColWidth);
-      const bottom = Math.min(height, headerMargin + endRowNum * averageRowHeight);
-      
-      const cropWidth = right - left;
-      const cropHeight = bottom - top;
-      
-      console.log(`Crop coordinates: left=${left}, top=${top}, width=${cropWidth}, height=${cropHeight}`);
-      
-      if (cropWidth <= 0 || cropHeight <= 0) {
-        throw new Error('Invalid crop dimensions calculated');
-      }
-      
-      // Perform the crop
-      await image.extract({ 
-        left: Math.round(left), 
-        top: Math.round(top), 
-        width: Math.round(cropWidth), 
-        height: Math.round(cropHeight) 
-      }).png().toFile(outputPng);
-      
-      console.log(`✅ Successfully cropped image to range ${range}`);
-      
-    } catch (error) {
-      console.warn('Cropping failed, using full image:', error.message);
-      // If cropping fails, copy the original image
-      const sharp = require('sharp');
-      await sharp(inputPng).png().toFile(outputPng);
-    }
-  }
-  
-  /**
-   * Convert column letter to number (A=1, B=2, ..., Z=26, AA=27, etc.)
-   */
-  columnToNumber(column) {
-    let result = 0;
-    for (let i = 0; i < column.length; i++) {
-      result = result * 26 + (column.charCodeAt(i) - 'A'.charCodeAt(0) + 1);
-    }
-    return result;
-  }
-
-  /**
-   * Cleanup temporary files
-   */
-  cleanup(files) {
-    files.forEach(file => {
-      try {
-        if (fs.existsSync(file)) {
-          fs.unlinkSync(file);
-        }
-      } catch (error) {
-        console.warn(`Failed to cleanup ${file}:`, error.message);
-      }
+      python.on('close', () => {
+        clearTimeout(timeout);
+      });
     });
   }
 
   /**
-   * Health check - verify LibreOffice and image tools are available
+   * Health check - verify Python and required tools are available
    */
   async healthCheck() {
     const checks = {
+      python: false,
+      openpyxl: false,
       libreoffice: false,
       poppler: false,
-      imagemagick: false
+      script: false
     };
     
     try {
-      await execAsync('soffice --version');
-      checks.libreoffice = true;
+      // Check Python
+      const pythonResult = await this.runCommand('python3', ['--version']);
+      checks.python = pythonResult.success;
+    } catch (error) {
+      checks.python = false;
+    }
+    
+    try {
+      // Check openpyxl
+      const openpyxlResult = await this.runCommand('python3', ['-c', 'import openpyxl; print("OK")']);
+      checks.openpyxl = openpyxlResult.success;
+    } catch (error) {
+      checks.openpyxl = false;
+    }
+    
+    try {
+      // Check LibreOffice
+      const libreResult = await this.runCommand('soffice', ['--version']);
+      checks.libreoffice = libreResult.success;
     } catch (error) {
       checks.libreoffice = false;
     }
     
     try {
-      await execAsync('pdftoppm -v');
-      checks.poppler = true;
+      // Check poppler
+      const popplerResult = await this.runCommand('pdftoppm', ['-v']);
+      checks.poppler = popplerResult.success;
     } catch (error) {
       checks.poppler = false;
     }
     
-    try {
-      await execAsync('convert -version');
-      checks.imagemagick = true;
-    } catch (error) {
-      checks.imagemagick = false;
-    }
-
+    // Check script exists
+    checks.script = fs.existsSync(this.pythonScript);
+    
+    const allReady = checks.python && checks.openpyxl && checks.libreoffice && checks.poppler && checks.script;
+    
     return {
-      available: checks.libreoffice && (checks.poppler || checks.imagemagick),
+      available: allReady,
+      python: checks.python,
+      openpyxl: checks.openpyxl,
       libreoffice: checks.libreoffice,
       poppler: checks.poppler,
-      imagemagick: checks.imagemagick,
-      recommendation: checks.libreoffice 
-        ? (checks.poppler 
-            ? 'All systems ready' 
-            : 'Install poppler-utils for better PDF conversion')
-        : 'Install LibreOffice: apt-get install libreoffice-calc'
+      script: checks.script,
+      recommendation: !allReady ? this.getRecommendation(checks) : 'All systems ready for Python extraction'
     };
+  }
+
+  /**
+   * Get installation recommendations based on missing components
+   */
+  getRecommendation(checks) {
+    const missing = [];
+    
+    if (!checks.python) missing.push('python3');
+    if (!checks.openpyxl) missing.push('pip3 install openpyxl');
+    if (!checks.libreoffice) missing.push('apt-get install libreoffice-calc');
+    if (!checks.poppler) missing.push('apt-get install poppler-utils');
+    if (!checks.script) missing.push('extract_table.py script missing');
+    
+    return `Install missing components: ${missing.join(', ')}`;
+  }
+
+  /**
+   * Helper to run shell commands
+   */
+  async runCommand(command, args) {
+    return new Promise((resolve) => {
+      const proc = spawn(command, args, { stdio: 'pipe' });
+      
+      proc.on('close', (code) => {
+        resolve({ success: code === 0 });
+      });
+      
+      proc.on('error', () => {
+        resolve({ success: false });
+      });
+      
+      setTimeout(() => {
+        proc.kill();
+        resolve({ success: false });
+      }, 5000);
+    });
   }
 }
 

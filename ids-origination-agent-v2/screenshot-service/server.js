@@ -103,7 +103,7 @@ app.post('/convert', async (req, res) => {
       filename: filename || 'screenshot.png',
       image: base64Image,
       mimeType: 'image/png',
-      method: 'libreoffice-visual-rendering',
+      method: 'python-openpyxl-extraction',
       preservedFormatting: true
     });
 
@@ -183,7 +183,7 @@ app.post('/detect-and-capture', async (req, res) => {
       filename: outputFilename,
       image: base64Image,
       mimeType: 'image/png',
-      method: 'libreoffice-visual-rendering',
+      method: 'python-openpyxl-extraction',
       preservedFormatting: true,
       detected: {
         sheet: detection.sheet,
