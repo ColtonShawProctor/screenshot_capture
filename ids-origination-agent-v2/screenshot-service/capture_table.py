@@ -93,8 +93,8 @@ def expand_to_table(sheet, header_cell, table_name):
     # Table-specific max widths (known from analysis)
     max_widths = {
         'Sources and Uses': 7,
-        'Take Out Loan Sizing': 3,
-        'Capital Stack at Closing': 7,
+        'Take Out Loan Sizing': 5,  # Was 3, increased
+        'Capital Stack at Closing': 8,  # Was 7, increased  
         'Loan to Cost': 7,
         'Loan to Value': 7,
         'PILOT Schedule': 8,
