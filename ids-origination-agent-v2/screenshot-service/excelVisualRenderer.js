@@ -135,31 +135,40 @@ class ExcelVisualRenderer {
     const targetWorkbook = new ExcelJS.Workbook();
     const targetSheet = targetWorkbook.addWorksheet('ExtractedRange');
     
-    // First, identify all merges in the source range
+    // First, identify all merges in the source range using correct ExcelJS format
     const sourceMerges = [];
-    const merges = sourceSheet._merges || sourceSheet['!merges'] || [];
+    
+    // ExcelJS stores merges as array of range strings in model.merges
+    const merges = sourceSheet.model?.merges || [];
     if (Array.isArray(merges)) {
       merges.forEach(merge => {
-        const [startAddr, endAddr] = merge.split(':');
-        const mergeStartCell = sourceSheet.getCell(startAddr);
-        const mergeEndCell = sourceSheet.getCell(endAddr);
-        
-        // Check if merge intersects with our range
-        if (mergeStartCell.row <= endRow && mergeEndCell.row >= startRow &&
-            mergeStartCell.col <= endCol && mergeEndCell.col >= startCol) {
-          sourceMerges.push({
-            startRow: Math.max(mergeStartCell.row, startRow),
-            endRow: Math.min(mergeEndCell.row, endRow),
-            startCol: Math.max(mergeStartCell.col, startCol),
-            endCol: Math.min(mergeEndCell.col, endCol),
-            masterRow: mergeStartCell.row,
-            masterCol: mergeStartCell.col
-          });
+        // merge is a string like "B8:D8"
+        if (typeof merge === 'string' && merge.includes(':')) {
+          const [startAddr, endAddr] = merge.split(':');
+          const mergeStartCell = sourceSheet.getCell(startAddr);
+          const mergeEndCell = sourceSheet.getCell(endAddr);
+          
+          // Check if merge intersects with our range
+          if (mergeStartCell.row <= endRow && mergeEndCell.row >= startRow &&
+              mergeStartCell.col <= endCol && mergeEndCell.col >= startCol) {
+            sourceMerges.push({
+              startRow: Math.max(mergeStartCell.row, startRow),
+              endRow: Math.min(mergeEndCell.row, endRow),
+              startCol: Math.max(mergeStartCell.col, startCol),
+              endCol: Math.min(mergeEndCell.col, endCol),
+              masterRow: mergeStartCell.row,
+              masterCol: mergeStartCell.col,
+              range: merge
+            });
+          }
         }
       });
     }
     
+    console.log(`Found ${sourceMerges.length} merges in range ${range}:`, sourceMerges.map(m => m.range));
+    
     // Copy cells from source range to target sheet (starting at A1)
+    // IMPORTANT: Copy ALL columns in range, including empty ones (for two-sided tables)
     const processedMasters = new Set();
     let targetRowNum = 1;
     for (let sourceRowNum = startRow; sourceRowNum <= endRow; sourceRowNum++) {
@@ -171,7 +180,7 @@ class ExcelVisualRenderer {
         const sourceCell = sourceRow.getCell(sourceColNum);
         const targetCell = targetRow.getCell(targetColNum);
         
-        // Handle merged cells
+        // Handle merged cells - only render text in top-left (master) cell
         let cellValue = sourceCell.value;
         if (sourceCell.isMerged) {
           // Find the merge this cell belongs to
@@ -182,16 +191,16 @@ class ExcelVisualRenderer {
           
           if (merge) {
             const masterId = `${merge.masterRow}_${merge.masterCol}`;
-            const masterCell = sourceSheet.getCell(merge.masterRow, merge.masterCol);
             
-            // Only copy value from master cell, others get empty
+            // Only show text in the top-left cell of the merge (master cell)
             if (sourceRowNum === merge.masterRow && sourceColNum === merge.masterCol) {
+              // This is the master cell - keep the value
+              const masterCell = sourceSheet.getCell(merge.masterRow, merge.masterCol);
               cellValue = masterCell.value;
               processedMasters.add(masterId);
-            } else if (processedMasters.has(masterId)) {
-              cellValue = null; // Already processed the master
             } else {
-              cellValue = masterCell.value;
+              // This is a slave cell in the merge - clear the value but keep formatting
+              cellValue = null;
             }
           }
         }
@@ -208,16 +217,18 @@ class ExcelVisualRenderer {
           }
         }
         
-        // Copy cell value
+        // Copy cell value (even if null for merged cells)
         targetCell.value = cellValue;
         
-        // Copy cell styling (font, fill, border, alignment)
+        // ALWAYS copy cell styling (font, fill, border, alignment) for all cells
+        // This preserves formatting even for empty/gap columns in two-sided tables
         if (sourceCell.font) targetCell.font = sourceCell.font;
         if (sourceCell.fill) targetCell.fill = sourceCell.fill;
         if (sourceCell.border) targetCell.border = sourceCell.border;
         if (sourceCell.alignment) targetCell.alignment = sourceCell.alignment;
         if (sourceCell.numFmt) targetCell.numFmt = sourceCell.numFmt;
         
+        // Always increment target column - don't skip any columns in the range
         targetColNum++;
       }
       targetRowNum++;
