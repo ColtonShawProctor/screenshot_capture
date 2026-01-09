@@ -10,6 +10,7 @@ import base64
 import tempfile
 import os
 import time
+import subprocess
 
 import uno
 from com.sun.star.beans import PropertyValue
@@ -120,7 +121,7 @@ def expand_to_table(sheet, header_cell):
 
 def export_range_as_image(doc, sheet, table_range, output_path):
     """
-    Select range and export as PNG.
+    Select range, export as PDF, convert to PNG.
     """
     # Activate the sheet
     controller = doc.getCurrentController()
@@ -132,15 +133,37 @@ def export_range_as_image(doc, sheet, table_range, output_path):
     # Force recalculation
     doc.calculateAll()
     
-    # Export as PNG with selection only
-    output_url = uno.systemPathToFileUrl(output_path)
+    # Export as PDF first (SelectionOnly works with PDF)
+    pdf_path = output_path.replace('.png', '.pdf')
+    pdf_url = uno.systemPathToFileUrl(pdf_path)
     
-    export_props = (
-        PropertyValue(Name="FilterName", Value="calc_png_Export"),
-        PropertyValue(Name="SelectionOnly", Value=True),
+    # PDF export filter data
+    filter_data = (
+        PropertyValue(Name="Selection", Value=table_range),
     )
     
-    doc.storeToURL(output_url, export_props)
+    export_props = (
+        PropertyValue(Name="FilterName", Value="calc_pdf_Export"),
+        PropertyValue(Name="FilterData", Value=filter_data),
+    )
+    
+    doc.storeToURL(pdf_url, export_props)
+    
+    # Convert PDF to PNG using pdftoppm
+    png_base = output_path.replace('.png', '')
+    subprocess.run([
+        'pdftoppm', '-png', '-r', '150', '-singlefile',
+        pdf_path, png_base
+    ], check=True, capture_output=True)
+    
+    # pdftoppm outputs to {base}.png
+    actual_png = png_base + '.png'
+    if actual_png != output_path:
+        os.rename(actual_png, output_path)
+    
+    # Cleanup PDF
+    if os.path.exists(pdf_path):
+        os.unlink(pdf_path)
 
 
 def main():

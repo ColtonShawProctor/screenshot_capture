@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     net-tools \
     iproute2 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js for the HTTP service wrapper
