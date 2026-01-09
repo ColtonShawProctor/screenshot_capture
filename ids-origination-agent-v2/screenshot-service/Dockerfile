@@ -21,16 +21,16 @@ RUN pip3 install openpyxl
 WORKDIR /app
 
 # Copy package files
-COPY screenshot-service/package*.json ./
+COPY package*.json ./
 
 # Install dependencies
 RUN npm install --omit=dev
 
 # Copy application files
-COPY screenshot-service/server.js ./
-COPY screenshot-service/tableDetector.js ./
-COPY screenshot-service/excelVisualRenderer.js ./
-COPY screenshot-service/extract_table.py ./
+COPY server.js ./
+COPY tableDetector.js ./
+COPY excelVisualRenderer.js ./
+COPY extract_table.py ./
 
 # Make Python script executable  
 RUN chmod +x extract_table.py
