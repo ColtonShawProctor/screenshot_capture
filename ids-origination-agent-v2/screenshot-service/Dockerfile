@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     fonts-dejavu \
     curl \
+    net-tools \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js for the HTTP service wrapper
@@ -24,6 +26,6 @@ COPY . .
 EXPOSE 3000
 
 # Start LibreOffice listener in background, then Node server
-CMD soffice --headless --accept="socket,host=localhost,port=2002;urp;StarOffice.ServiceManager" & \
-    sleep 3 && \
+CMD soffice --headless --accept="socket,host=0.0.0.0,port=2002;urp;" & \
+    sleep 5 && \
     node server.js

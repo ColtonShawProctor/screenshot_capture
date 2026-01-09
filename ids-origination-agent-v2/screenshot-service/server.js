@@ -15,6 +15,26 @@ exec('python3 -c "import uno; print(\'UNO import OK\')"', (err, stdout, stderr) 
     }
 });
 
+// Wait for LibreOffice listener to be ready
+function waitForLibreOffice(maxAttempts = 10) {
+    for (let i = 0; i < maxAttempts; i++) {
+        try {
+            execSync('python3 -c "import uno; from com.sun.star.connection import NoConnectException; ctx = uno.getComponentContext(); resolver = ctx.ServiceManager.createInstanceWithContext(\'com.sun.star.bridge.UnoUrlResolver\', ctx); resolver.resolve(\'uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext\')"', { timeout: 5000 });
+            console.log('LibreOffice listener ready!');
+            return true;
+        } catch (e) {
+            console.log(`Waiting for LibreOffice... attempt ${i + 1}`);
+            try {
+                execSync('sleep 2');
+            } catch (sleepErr) {
+                // Ignore sleep errors
+            }
+        }
+    }
+    console.error('LibreOffice listener failed to start');
+    return false;
+}
+
 // Wait for LibreOffice and verify it's running
 setTimeout(() => {
     try {
@@ -30,7 +50,10 @@ setTimeout(() => {
     } catch (e) {
         console.log('Port 2002: not listening or cannot check');
     }
-}, 3000);
+    
+    // Verify LibreOffice listener is ready
+    waitForLibreOffice();
+}, 5000);
 
 app.post('/detect-and-capture', async (req, res) => {
     const { excelBase64, tableName, filename } = req.body;
@@ -73,6 +96,11 @@ function captureTable(excelBase64, tableName) {
         python.stderr.on('data', (data) => { stderr += data; });
         
         python.on('close', (code) => {
+            // LOG THE STDERR
+            if (stderr) {
+                console.error(`Python stderr: ${stderr}`);
+            }
+            
             if (code === 0 && stdout) {
                 try {
                     resolve(JSON.parse(stdout));
