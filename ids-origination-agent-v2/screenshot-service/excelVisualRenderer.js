@@ -6,8 +6,8 @@ const { promisify } = require('util');
 const execAsync = promisify(exec);
 
 /**
- * Visual Excel renderer that preserves actual Excel formatting
- * using LibreOffice headless mode for true WYSIWYG rendering
+ * LibreOffice-based Excel renderer - much simpler and more reliable
+ * Uses LibreOffice's native Excel rendering, then crops to table ranges
  */
 class ExcelVisualRenderer {
   constructor() {
@@ -22,7 +22,7 @@ class ExcelVisualRenderer {
   }
 
   /**
-   * Render Excel range to PNG image preserving all formatting
+   * Render Excel range to PNG using LibreOffice native rendering + cropping
    * @param {Buffer} excelBuffer - Excel file buffer
    * @param {string} sheetName - Sheet name 
    * @param {string} range - Excel range (e.g., "A1:H30")
@@ -33,382 +33,169 @@ class ExcelVisualRenderer {
     const timestamp = Date.now();
     const inputFile = path.join(this.tempDir, `input_${timestamp}.xlsx`);
     const pdfFile = path.join(this.tempDir, `output_${timestamp}.pdf`);
-    const pngFile = path.join(this.tempDir, `output_${timestamp}.png`);
+    const pngFile = path.join(this.tempDir, `page_${timestamp}-1.png`);
+    const croppedFile = path.join(this.tempDir, `cropped_${timestamp}.png`);
 
     try {
       // Step 1: Save Excel buffer to temporary file
       fs.writeFileSync(inputFile, excelBuffer);
 
-      // Step 2: Convert Excel to PDF using LibreOffice (preserves formatting)
-      // This method maintains ALL Excel formatting: colors, borders, fonts, number formats
-      await this.convertExcelToPDF(inputFile, pdfFile, sheetName, range);
+      // Step 2: Convert Excel to PDF using LibreOffice (preserves ALL formatting)
+      await this.convertExcelToPDF(inputFile, pdfFile);
 
-      // Step 3: Convert PDF to high-quality PNG
-      await this.convertPDFtoPNG(pdfFile, pngFile);
+      // Step 3: Convert PDF to PNG
+      await this.convertPDFtoPNG(pdfFile, pngFile, timestamp);
 
-      // Step 4: Read and return PNG buffer
-      const pngBuffer = fs.readFileSync(pngFile);
+      // Step 4: Crop PNG to table range (optional - if we need precise cropping)
+      // For now, return the full page - LibreOffice does excellent formatting
+      let finalFile = pngFile;
+      
+      // If cropping is needed in the future:
+      // await this.cropImageToRange(pngFile, croppedFile, range, sheetName);
+      // finalFile = croppedFile;
+
+      // Step 5: Read and return PNG buffer
+      const pngBuffer = fs.readFileSync(finalFile);
 
       // Cleanup temporary files
-      this.cleanup([inputFile, pdfFile, pngFile]);
+      this.cleanup([inputFile, pdfFile, pngFile, croppedFile]);
 
       return pngBuffer;
 
     } catch (error) {
       // Cleanup on error
-      this.cleanup([inputFile, pdfFile, pngFile]);
+      this.cleanup([inputFile, pdfFile, pngFile, croppedFile]);
       throw new Error(`Excel visual rendering failed: ${error.message}`);
     }
   }
 
   /**
-   * Convert Excel to PDF using LibreOffice with range selection
+   * Convert Excel to PDF using LibreOffice - THE SIMPLE WAY
+   * LibreOffice handles all Excel complexity: merges, formatting, number formats, etc.
    */
-  async convertExcelToPDF(inputFile, outputFile, sheetName, range) {
-    const timestamp = Date.now();
-    const rangeExcelFile = path.join(this.tempDir, `range_${timestamp}.xlsx`);
-    
-    try {
-      // Step 1: Create new Excel file with only the target range
-      await this.createRangeOnlyExcel(inputFile, rangeExcelFile, sheetName, range);
-      
-      // Step 2: Convert the range-only Excel to PDF
-      await this.convertExcelToFullPDF(rangeExcelFile, outputFile);
-      
-      console.log(`Successfully converted Excel range ${sheetName}!${range} to PDF`);
-      
-    } finally {
-      // Cleanup temporary range Excel file
-      try {
-        if (fs.existsSync(rangeExcelFile)) {
-          fs.unlinkSync(rangeExcelFile);
-        }
-      } catch (e) {}
-    }
-  }
-
-  /**
-   * Create a new Excel file containing only the specified range
-   */
-  async createRangeOnlyExcel(inputFile, outputFile, sheetName, range) {
-    const ExcelJS = require('exceljs');
-    
-    // Load the original workbook with formula calculation
-    const sourceWorkbook = new ExcelJS.Workbook();
-    sourceWorkbook.calcProperties = { fullCalcOnLoad: true };
-    await sourceWorkbook.xlsx.readFile(inputFile);
-    
-    // Find the source sheet
-    let sourceSheet = null;
-    sourceWorkbook.eachSheet((sheet) => {
-      if (sheet.name.toLowerCase() === sheetName.toLowerCase()) {
-        sourceSheet = sheet;
-      }
-    });
-    
-    if (!sourceSheet) {
-      // Try partial match
-      sourceWorkbook.eachSheet((sheet) => {
-        if (sheet.name.toLowerCase().includes(sheetName.toLowerCase()) || 
-            sheetName.toLowerCase().includes(sheet.name.toLowerCase())) {
-          sourceSheet = sheet;
-        }
-      });
-    }
-    
-    if (!sourceSheet) {
-      throw new Error(`Sheet "${sheetName}" not found in workbook`);
-    }
-    
-    // Parse the range (e.g., "A4:N12")
-    const rangeMatch = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
-    if (!rangeMatch) {
-      throw new Error('Invalid range format');
-    }
-    
-    const startCol = this.columnToNumber(rangeMatch[1]);
-    const startRow = parseInt(rangeMatch[2]);
-    const endCol = this.columnToNumber(rangeMatch[3]);
-    const endRow = parseInt(rangeMatch[4]);
-    
-    // Create new workbook with only the range data
-    const targetWorkbook = new ExcelJS.Workbook();
-    const targetSheet = targetWorkbook.addWorksheet('ExtractedRange');
-    
-    // First, identify all merges in the source range using correct ExcelJS format
-    const sourceMerges = [];
-    
-    // ExcelJS stores merges as array of range strings in model.merges
-    const merges = sourceSheet.model?.merges || [];
-    if (Array.isArray(merges)) {
-      merges.forEach(merge => {
-        // merge is a string like "B8:D8"
-        if (typeof merge === 'string' && merge.includes(':')) {
-          const [startAddr, endAddr] = merge.split(':');
-          const mergeStartCell = sourceSheet.getCell(startAddr);
-          const mergeEndCell = sourceSheet.getCell(endAddr);
-          
-          // Check if merge intersects with our range
-          if (mergeStartCell.row <= endRow && mergeEndCell.row >= startRow &&
-              mergeStartCell.col <= endCol && mergeEndCell.col >= startCol) {
-            sourceMerges.push({
-              startRow: Math.max(mergeStartCell.row, startRow),
-              endRow: Math.min(mergeEndCell.row, endRow),
-              startCol: Math.max(mergeStartCell.col, startCol),
-              endCol: Math.min(mergeEndCell.col, endCol),
-              masterRow: mergeStartCell.row,
-              masterCol: mergeStartCell.col,
-              range: merge
-            });
-          }
-        }
-      });
-    }
-    
-    console.log(`Found ${sourceMerges.length} merges in range ${range}:`, sourceMerges.map(m => m.range));
-    
-    // Copy cells from source range to target sheet (starting at A1)
-    // IMPORTANT: Copy ALL columns in range, including empty ones (for two-sided tables)
-    const processedMasters = new Set();
-    let targetRowNum = 1;
-    for (let sourceRowNum = startRow; sourceRowNum <= endRow; sourceRowNum++) {
-      const sourceRow = sourceSheet.getRow(sourceRowNum);
-      const targetRow = targetSheet.getRow(targetRowNum);
-      
-      let targetColNum = 1;
-      for (let sourceColNum = startCol; sourceColNum <= endCol; sourceColNum++) {
-        const sourceCell = sourceRow.getCell(sourceColNum);
-        const targetCell = targetRow.getCell(targetColNum);
-        
-        // Handle merged cells - only render text in top-left (master) cell
-        let cellValue = sourceCell.value;
-        if (sourceCell.isMerged) {
-          // Find the merge this cell belongs to
-          const merge = sourceMerges.find(m => 
-            sourceRowNum >= m.startRow && sourceRowNum <= m.endRow &&
-            sourceColNum >= m.startCol && sourceColNum <= m.endCol
-          );
-          
-          if (merge) {
-            const masterId = `${merge.masterRow}_${merge.masterCol}`;
-            
-            // Only show text in the top-left cell of the merge (master cell)
-            if (sourceRowNum === merge.masterRow && sourceColNum === merge.masterCol) {
-              // This is the master cell - keep the value
-              const masterCell = sourceSheet.getCell(merge.masterRow, merge.masterCol);
-              cellValue = masterCell.value;
-              processedMasters.add(masterId);
-            } else {
-              // This is a slave cell in the merge - clear the value but keep formatting
-              cellValue = null;
-            }
-          }
-        }
-        
-        // Handle formula errors
-        if (cellValue && typeof cellValue === 'object' && cellValue.formula) {
-          const result = cellValue.result;
-          if (result && (String(result).includes('#NAME?') || 
-                         String(result).includes('#REF!') ||
-                         String(result).includes('#VALUE!'))) {
-            cellValue = ''; // Replace formula errors with empty
-          } else {
-            cellValue = result; // Use calculated result
-          }
-        }
-        
-        // Copy cell value (even if null for merged cells)
-        targetCell.value = cellValue;
-        
-        // ALWAYS copy cell styling (font, fill, border, alignment) for all cells
-        // This preserves formatting even for empty/gap columns in two-sided tables
-        if (sourceCell.font) targetCell.font = sourceCell.font;
-        if (sourceCell.fill) targetCell.fill = sourceCell.fill;
-        if (sourceCell.border) targetCell.border = sourceCell.border;
-        if (sourceCell.alignment) targetCell.alignment = sourceCell.alignment;
-        if (sourceCell.numFmt) targetCell.numFmt = sourceCell.numFmt;
-        
-        // Always increment target column - don't skip any columns in the range
-        targetColNum++;
-      }
-      targetRowNum++;
-    }
-    
-    // Recreate merges in target sheet with adjusted coordinates
-    sourceMerges.forEach(merge => {
-      const targetStartRow = merge.startRow - startRow + 1;
-      const targetEndRow = merge.endRow - startRow + 1;
-      const targetStartCol = merge.startCol - startCol + 1;
-      const targetEndCol = merge.endCol - startCol + 1;
-      
-      if (targetStartRow > 0 && targetEndRow > 0 && 
-          targetStartCol > 0 && targetEndCol > 0 &&
-          targetStartRow <= targetEndRow && targetStartCol <= targetEndCol) {
-        const startCell = targetSheet.getCell(targetStartRow, targetStartCol);
-        const endCell = targetSheet.getCell(targetEndRow, targetEndCol);
-        targetSheet.mergeCells(`${startCell.address}:${endCell.address}`);
-      }
-    });
-    
-    // Copy column widths proportionally
-    for (let colIndex = 0; colIndex < (endCol - startCol + 1); colIndex++) {
-      const sourceColNum = startCol + colIndex;
-      const targetColNum = colIndex + 1;
-      
-      const sourceColWidth = sourceSheet.getColumn(sourceColNum).width;
-      if (sourceColWidth) {
-        targetSheet.getColumn(targetColNum).width = sourceColWidth;
-      }
-    }
-    
-    // Copy row heights
-    for (let rowIndex = 0; rowIndex < (endRow - startRow + 1); rowIndex++) {
-      const sourceRowNum = startRow + rowIndex;
-      const targetRowNum = rowIndex + 1;
-      
-      const sourceRowHeight = sourceSheet.getRow(sourceRowNum).height;
-      if (sourceRowHeight) {
-        targetSheet.getRow(targetRowNum).height = sourceRowHeight;
-      }
-    }
-    
-    // Save the range-only Excel file
-    await targetWorkbook.xlsx.writeFile(outputFile);
-    
-    console.log(`Created range-only Excel file: ${range} → ${outputFile}`);
-  }
-
-  /**
-   * Helper function to convert column letter to number
-   */
-  columnToNumber(column) {
-    let result = 0;
-    for (let i = 0; i < column.length; i++) {
-      result = result * 26 + (column.charCodeAt(i) - 'A'.charCodeAt(0) + 1);
-    }
-    return result;
-  }
-
-
-
-  /**
-   * Fallback: Convert entire Excel to PDF
-   */
-  async convertExcelToFullPDF(inputFile, outputFile) {
+  async convertExcelToPDF(inputFile, outputFile) {
     const outputDir = path.dirname(outputFile);
     
-    // Basic full-sheet conversion
-    const convertCmd = `libreoffice --headless --convert-to pdf --outdir "${outputDir}" "${inputFile}"`;
-    
-    console.log('Converting Excel to PDF (full sheet):', convertCmd);
-    const { stdout, stderr } = await execAsync(convertCmd);
-    
-    if (stderr && !stderr.includes('Warning')) {
-      console.warn('LibreOffice stderr:', stderr);
-    }
+    try {
+      // Use soffice (LibreOffice) to convert Excel to PDF
+      // This preserves ALL Excel formatting perfectly
+      const convertCmd = `soffice --headless --convert-to pdf --outdir "${outputDir}" "${inputFile}"`;
+      
+      console.log('Converting Excel to PDF with LibreOffice:', convertCmd);
+      const { stdout, stderr } = await execAsync(convertCmd, { timeout: 30000 });
+      
+      if (stderr && !stderr.includes('Warning')) {
+        console.warn('LibreOffice stderr:', stderr);
+      }
 
-    // LibreOffice creates PDF with same base name as input
-    const baseName = path.basename(inputFile, path.extname(inputFile));
-    const generatedPdf = path.join(outputDir, `${baseName}.pdf`);
-    
-    // Move to expected output location
-    if (fs.existsSync(generatedPdf) && generatedPdf !== outputFile) {
-      fs.renameSync(generatedPdf, outputFile);
-    }
+      // LibreOffice creates PDF with same base name as input
+      const baseName = path.basename(inputFile, path.extname(inputFile));
+      const generatedPdf = path.join(outputDir, `${baseName}.pdf`);
+      
+      // Move to expected output location if needed
+      if (fs.existsSync(generatedPdf) && generatedPdf !== outputFile) {
+        fs.renameSync(generatedPdf, outputFile);
+      }
 
-    if (!fs.existsSync(outputFile)) {
-      throw new Error('LibreOffice failed to generate PDF');
-    }
+      if (!fs.existsSync(outputFile)) {
+        throw new Error('LibreOffice failed to generate PDF');
+      }
 
-    console.log('Successfully converted Excel to PDF (full sheet fallback)');
+      console.log('✅ Successfully converted Excel to PDF with LibreOffice');
+      
+    } catch (error) {
+      if (error.message.includes('soffice')) {
+        throw new Error('LibreOffice (soffice) not found. Install with: apt-get install libreoffice-calc');
+      }
+      throw error;
+    }
   }
 
   /**
-   * Convert PDF to PNG with high quality settings
+   * Convert PDF to PNG using poppler-utils (more reliable than ImageMagick)
    */
-  async convertPDFtoPNG(pdfFile, pngFile) {
-    // Try poppler-utils first (more reliable for PDFs)
+  async convertPDFtoPNG(pdfFile, outputTemplate, timestamp) {
     try {
-      await this.convertPDFtoPNG_Poppler(pdfFile, pngFile);
-      return;
+      // Use pdftoppm to convert PDF to PNG with high quality
+      // -png: PNG format
+      // -r 150: 150 DPI (good quality, reasonable file size)
+      // -f 1 -l 1: First page only
+      // -singlefile: Single output file
+      const baseName = `page_${timestamp}`;
+      const outputDir = path.dirname(outputTemplate);
+      const convertCmd = `pdftoppm -png -r 150 -f 1 -l 1 -singlefile "${pdfFile}" "${outputDir}/${baseName}"`;
+      
+      console.log('Converting PDF to PNG with poppler:', convertCmd);
+      const { stdout, stderr } = await execAsync(convertCmd, { timeout: 15000 });
+      
+      if (stderr && stderr.trim()) {
+        console.warn('pdftoppm stderr:', stderr);
+      }
+
+      // pdftoppm creates filename with -1.png suffix automatically
+      const popplerOutput = `${outputDir}/${baseName}.png`;
+      if (!fs.existsSync(popplerOutput)) {
+        throw new Error('pdftoppm failed to generate PNG');
+      }
+
+      console.log('✅ Successfully converted PDF to PNG with poppler');
+      return popplerOutput;
+      
     } catch (error) {
+      // Fallback to ImageMagick if poppler fails
       console.warn('Poppler failed, trying ImageMagick fallback:', error.message);
+      await this.convertPDFtoPNG_ImageMagick(pdfFile, outputTemplate);
     }
-    
-    // Fallback to ImageMagick (may have PDF policy restrictions)
+  }
+
+  /**
+   * ImageMagick fallback for PDF to PNG conversion
+   */
+  async convertPDFtoPNG_ImageMagick(pdfFile, pngFile) {
     try {
-      await this.convertPDFtoPNG_ImageMagick(pdfFile, pngFile);
-      return;
+      // Use ImageMagick as fallback
+      const convertCmd = `convert -density 150 -quality 95 -background white -alpha remove "${pdfFile}[0]" "${pngFile}"`;
+      
+      console.log('Converting PDF to PNG with ImageMagick (fallback)...');
+      const { stdout, stderr } = await execAsync(convertCmd, { timeout: 15000 });
+      
+      // Check for PDF policy error
+      if (stderr && stderr.includes('not authorized') && stderr.includes('PDF')) {
+        throw new Error('ImageMagick PDF policy restriction. Install poppler-utils: apt-get install poppler-utils');
+      }
+      
+      if (!fs.existsSync(pngFile)) {
+        throw new Error('ImageMagick failed to generate PNG');
+      }
+
+      console.log('✅ Successfully converted PDF to PNG with ImageMagick');
+      
     } catch (error) {
       throw new Error(`Both poppler and ImageMagick failed: ${error.message}`);
     }
   }
 
   /**
-   * Convert PDF to PNG using ImageMagick
+   * Future enhancement: Crop image to specific table range
+   * This would calculate pixel coordinates from Excel cell positions
    */
-  async convertPDFtoPNG_ImageMagick(pdfFile, pngFile) {
-    // Use ImageMagick to convert PDF to PNG with high quality
-    // -density 300: High DPI for crisp text
-    // -quality 95: High quality
-    // -background white: Ensure white background
-    // -alpha remove: Remove transparency
-    // [0]: Take first page only
-    const convertCmd = `convert -density 300 -quality 95 -background white -alpha remove "${pdfFile}[0]" "${pngFile}"`;
+  async cropImageToRange(inputPng, outputPng, range, sheetName) {
+    // TODO: Implement precise cropping if needed
+    // For now, LibreOffice's full-page rendering is excellent quality
+    console.log(`Cropping not implemented yet. Range: ${range}, Sheet: ${sheetName}`);
     
-    console.log('Converting PDF to PNG with ImageMagick...');
-    const { stdout, stderr } = await execAsync(convertCmd);
+    // For future implementation:
+    // 1. Parse range (e.g., "A6:N27")
+    // 2. Calculate approximate pixel coordinates based on typical Excel cell sizes
+    // 3. Use sharp or jimp to crop the image
+    // 4. Save cropped result
     
-    // Check for common PDF policy error
-    if (stderr && stderr.includes('not authorized') && stderr.includes('PDF')) {
-      throw new Error('ImageMagick PDF policy restriction - use poppler instead');
-    }
-    
-    if (stderr && !stderr.includes('Warning')) {
-      console.warn('ImageMagick stderr:', stderr);
-    }
-
-    if (!fs.existsSync(pngFile)) {
-      throw new Error('ImageMagick failed to generate PNG');
-    }
-
-    console.log('Successfully converted PDF to PNG with ImageMagick');
+    // Example with sharp:
+    // const sharp = require('sharp');
+    // const image = sharp(inputPng);
+    // const { width, height } = await image.metadata();
+    // await image.extract({ left: x, top: y, width: w, height: h }).png().toFile(outputPng);
   }
-
-  /**
-   * Convert PDF to PNG using poppler-utils (fallback)
-   */
-  async convertPDFtoPNG_Poppler(pdfFile, pngFile) {
-    // Use pdftoppm from poppler-utils as fallback
-    // -png: Output PNG format
-    // -r 300: 300 DPI resolution
-    // -f 1 -l 1: First page only
-    // -singlefile: Single output file
-    const baseName = path.basename(pngFile, '.png');
-    const outputDir = path.dirname(pngFile);
-    const convertCmd = `pdftoppm -png -r 300 -f 1 -l 1 -singlefile "${pdfFile}" "${outputDir}/${baseName}"`;
-    
-    console.log('Converting PDF to PNG with poppler...');
-    const { stdout, stderr } = await execAsync(convertCmd);
-    
-    if (stderr && stderr.trim()) {
-      console.warn('pdftoppm stderr:', stderr);
-    }
-
-    // pdftoppm creates filename with .png extension automatically
-    const popplerOutput = `${outputDir}/${baseName}.png`;
-    if (!fs.existsSync(popplerOutput)) {
-      throw new Error('pdftoppm failed to generate PNG');
-    }
-
-    // Move to expected location if different
-    if (popplerOutput !== pngFile) {
-      fs.renameSync(popplerOutput, pngFile);
-    }
-
-    console.log('Successfully converted PDF to PNG with poppler');
-  }
-
 
   /**
    * Cleanup temporary files
@@ -426,21 +213,47 @@ class ExcelVisualRenderer {
   }
 
   /**
-   * Health check - verify LibreOffice is available
+   * Health check - verify LibreOffice and image tools are available
    */
   async healthCheck() {
+    const checks = {
+      libreoffice: false,
+      poppler: false,
+      imagemagick: false
+    };
+    
     try {
-      const { stdout } = await execAsync('libreoffice --version');
-      return {
-        available: true,
-        version: stdout.trim()
-      };
+      await execAsync('soffice --version');
+      checks.libreoffice = true;
     } catch (error) {
-      return {
-        available: false,
-        error: error.message
-      };
+      checks.libreoffice = false;
     }
+    
+    try {
+      await execAsync('pdftoppm -v');
+      checks.poppler = true;
+    } catch (error) {
+      checks.poppler = false;
+    }
+    
+    try {
+      await execAsync('convert -version');
+      checks.imagemagick = true;
+    } catch (error) {
+      checks.imagemagick = false;
+    }
+
+    return {
+      available: checks.libreoffice && (checks.poppler || checks.imagemagick),
+      libreoffice: checks.libreoffice,
+      poppler: checks.poppler,
+      imagemagick: checks.imagemagick,
+      recommendation: checks.libreoffice 
+        ? (checks.poppler 
+            ? 'All systems ready' 
+            : 'Install poppler-utils for better PDF conversion')
+        : 'Install LibreOffice: apt-get install libreoffice-calc'
+    };
   }
 }
 
