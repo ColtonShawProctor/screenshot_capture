@@ -137,24 +137,27 @@ class ExcelVisualRenderer {
     
     // First, identify all merges in the source range
     const sourceMerges = [];
-    sourceSheet._merges.forEach(merge => {
-      const [startAddr, endAddr] = merge.split(':');
-      const mergeStartCell = sourceSheet.getCell(startAddr);
-      const mergeEndCell = sourceSheet.getCell(endAddr);
-      
-      // Check if merge intersects with our range
-      if (mergeStartCell.row <= endRow && mergeEndCell.row >= startRow &&
-          mergeStartCell.col <= endCol && mergeEndCell.col >= startCol) {
-        sourceMerges.push({
-          startRow: Math.max(mergeStartCell.row, startRow),
-          endRow: Math.min(mergeEndCell.row, endRow),
-          startCol: Math.max(mergeStartCell.col, startCol),
-          endCol: Math.min(mergeEndCell.col, endCol),
-          masterRow: mergeStartCell.row,
-          masterCol: mergeStartCell.col
-        });
-      }
-    });
+    const merges = sourceSheet._merges || sourceSheet['!merges'] || [];
+    if (Array.isArray(merges)) {
+      merges.forEach(merge => {
+        const [startAddr, endAddr] = merge.split(':');
+        const mergeStartCell = sourceSheet.getCell(startAddr);
+        const mergeEndCell = sourceSheet.getCell(endAddr);
+        
+        // Check if merge intersects with our range
+        if (mergeStartCell.row <= endRow && mergeEndCell.row >= startRow &&
+            mergeStartCell.col <= endCol && mergeEndCell.col >= startCol) {
+          sourceMerges.push({
+            startRow: Math.max(mergeStartCell.row, startRow),
+            endRow: Math.min(mergeEndCell.row, endRow),
+            startCol: Math.max(mergeStartCell.col, startCol),
+            endCol: Math.min(mergeEndCell.col, endCol),
+            masterRow: mergeStartCell.row,
+            masterCol: mergeStartCell.col
+          });
+        }
+      });
+    }
     
     // Copy cells from source range to target sheet (starting at A1)
     const processedMasters = new Set();
