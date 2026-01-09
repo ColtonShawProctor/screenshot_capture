@@ -4,20 +4,13 @@ FROM node:20-slim
 RUN apt-get update && apt-get install -y \
     libreoffice-calc \
     python3 \
-    python3-pip \
-    python3-venv \
-    build-essential \
-    python3-dev \
+    python3-openpyxl \
     poppler-utils \
     fonts-liberation \
     fonts-noto-cjk \
     curl \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip and install Python dependencies
-RUN python3 -m pip install --upgrade pip && \
-    pip3 install --no-cache-dir openpyxl
 
 # Remove old ImageMagick and Chromium configs (no longer needed)
 # The new Python-based approach uses LibreOffice + poppler only
