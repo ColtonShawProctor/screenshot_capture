@@ -20,8 +20,8 @@ function fuzzyMatch(str1, str2, threshold = 0.8) {
   // Exact match
   if (s1 === s2) return 1.0;
   
-  // Contains match
-  if (s1.includes(s2) || s2.includes(s1)) return 0.9;
+  // Contains match - but only if both strings are reasonably long
+  if ((s1.includes(s2) && s2.length >= 3) || (s2.includes(s1) && s1.length >= 3)) return 0.9;
   
   // Handle & vs and
   const normalized1 = s1.replace(/&/g, 'and').replace(/\s+/g, ' ');
@@ -167,8 +167,14 @@ function getCellValue(cell, visitedMerges = new Set()) {
 function getMergedRange(worksheet, cell) {
   if (!cell.isMerged) return null;
   
+  // Get merges array - handle different library formats
+  const merges = worksheet._merges || worksheet['!merges'] || [];
+  if (!merges || typeof merges[Symbol.iterator] !== 'function') {
+    return null;
+  }
+  
   // Find the merge that contains this cell
-  for (const merge of worksheet._merges) {
+  for (const merge of merges) {
     const [startAddr, endAddr] = merge.split(':');
     const startCell = worksheet.getCell(startAddr);
     const endCell = worksheet.getCell(endAddr);
@@ -221,13 +227,27 @@ function findTableHeader(worksheet, tableName, maxRows = 200, maxCols = 30) {
       // Check each variation
       for (const variation of variations) {
         const score = fuzzyMatch(cellValue, variation);
-        if (score > 0.7) {
+        // Use higher threshold for PILOT to avoid false positives with single letters
+        const threshold = variation.includes('pilot') ? 0.85 : 0.7;
+        if (score > threshold) {
+          // Calculate proximity to data - prefer headers closer to actual table data
+          let proximityBonus = 0;
+          for (let checkRow = row + 1; checkRow <= Math.min(row + 5, worksheet.rowCount); checkRow++) {
+            for (let checkCol = Math.max(1, col - 3); checkCol <= Math.min(worksheet.columnCount, col + 10); checkCol++) {
+              const dataCell = worksheet.getCell(checkRow, checkCol);
+              const dataValue = getCellValue(dataCell);
+              if (isTableData(dataValue, dataCell)) {
+                proximityBonus = Math.max(proximityBonus, 0.1 / (checkRow - row));
+              }
+            }
+          }
+          
           matches.push({
             row,
             col,
             cell,
             value: cellValue,
-            score,
+            score: score + proximityBonus,
             confidence: score >= 0.95 ? 'exact' : 'fuzzy'
           });
         }
@@ -281,6 +301,7 @@ function isTableData(value, cell) {
 // Find table boundaries from header - IMPROVED VERSION
 function findTableBoundaries(worksheet, headerMatch, padding = 1) {
   const { row: headerRow, col: headerCol } = headerMatch;
+  const tableName = headerMatch.value?.toLowerCase() || '';
   
   // Start with header position as initial boundaries
   let leftCol = headerCol;
@@ -291,6 +312,11 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
   // For two-sided tables (like Sources & Uses), we need to detect gaps
   let gapCols = [];
   let hasSignificantGap = false;
+  
+  // Special handling for specific table types
+  const isSourcesUses = tableName.includes('sources') && tableName.includes('uses');
+  const isTakeOutLoan = tableName.includes('take out') || tableName.includes('takeout');
+  const isCapitalStack = tableName.includes('capital stack');
   
   // Step 1: Find the actual header row extent (might be merged cells)
   const headerCell = worksheet.getCell(headerRow, headerCol);
@@ -330,11 +356,16 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
   let consecutiveEmptyCols = 0;
   let rightmostDataCol = headerCol;
   
-  for (let col = headerCol; col <= Math.min(worksheet.columnCount, headerCol + 20); col++) {
+  // For Sources & Uses and Capital Stack, we need to look further to capture both sides
+  const maxSearchCol = (isSourcesUses || isCapitalStack) ? headerCol + 15 : headerCol + 10;
+  const maxGapTolerance = (isSourcesUses || isCapitalStack) ? 5 : 3;
+  
+  for (let col = headerCol; col <= Math.min(worksheet.columnCount, maxSearchCol); col++) {
     let hasData = false;
     
-    // Check if column has data
-    for (let r = headerRow; r <= Math.min(headerRow + 10, worksheet.rowCount); r++) {
+    // Check if column has data - look in more rows for two-sided tables
+    const searchRows = (isSourcesUses || isCapitalStack) ? 20 : 10;
+    for (let r = headerRow; r <= Math.min(headerRow + searchRows, worksheet.rowCount); r++) {
       const cell = worksheet.getCell(r, col);
       const value = getCellValue(cell);
       
@@ -357,10 +388,10 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
       gapCols.push(col);
       
       // For two-sided tables, continue looking after a gap
-      if (consecutiveEmptyCols <= 3 && col < headerCol + 15) {
+      if (consecutiveEmptyCols <= maxGapTolerance && col < maxSearchCol) {
         continue;
-      } else if (!hasSignificantGap) {
-        // No significant gap found, so this is the end
+      } else if (!hasSignificantGap && !isSourcesUses && !isCapitalStack) {
+        // No significant gap found, so this is the end (for single-sided tables)
         break;
       }
     }
@@ -395,7 +426,10 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
   let lastDataRow = headerRow;
   let foundTotal = false;
   
-  for (let row = headerRow + 1; row <= Math.min(worksheet.rowCount, headerRow + 50); row++) {
+  // For Sources & Uses, search more rows since it goes to row 26
+  const maxSearchRows = (isSourcesUses || isCapitalStack) ? 25 : 20;
+  
+  for (let row = headerRow + 1; row <= Math.min(worksheet.rowCount, headerRow + maxSearchRows); row++) {
     let hasData = false;
     let rowValues = [];
     
@@ -414,16 +448,34 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
     if (hasData) {
       lastDataRow = row;
       
-      // Check if this is a total row
+      // Check if this is a total row (must be just "Total", not part of another label)
       const rowText = rowValues.join(' ');
-      if (rowText.includes('total') && !rowText.includes('subtotal')) {
+      const hasTotalWord = rowValues.some(val => val.toLowerCase().trim() === 'total');
+      if (hasTotalWord && !rowText.includes('subtotal')) {
         foundTotal = true;
         bottomRow = row;
+        // For Sources & Uses and Capital Stack, include a few more rows after Total (for notes)
+        if ((isSourcesUses || isCapitalStack) && row + 2 <= worksheet.rowCount) {
+          // Check if next 2 rows have notes/estimates
+          for (let noteRow = row + 1; noteRow <= Math.min(row + 2, worksheet.rowCount); noteRow++) {
+            let hasNotes = false;
+            for (let col = leftCol; col <= rightCol; col++) {
+              const noteCell = worksheet.getCell(noteRow, col);
+              const noteValue = getCellValue(noteCell);
+              if (noteValue && (noteValue.includes('*') || noteValue.includes('estimate') || noteValue.includes('month'))) {
+                hasNotes = true;
+                bottomRow = noteRow;
+                break;
+              }
+            }
+            if (!hasNotes) break;
+          }
+        }
         break;
       }
     } else {
       // Empty row - check if we should stop
-      if (row - lastDataRow > 1) {
+      if (row - lastDataRow > 1 && !isSourcesUses) {
         bottomRow = lastDataRow;
         break;
       }
