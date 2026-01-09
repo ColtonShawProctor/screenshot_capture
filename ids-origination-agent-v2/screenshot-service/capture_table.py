@@ -14,6 +14,7 @@ import subprocess
 
 import uno
 from com.sun.star.beans import PropertyValue
+from com.sun.star.table import CellRangeAddress
 
 
 def connect_to_libreoffice(max_retries=5):
@@ -121,30 +122,49 @@ def expand_to_table(sheet, header_cell):
 
 def export_range_as_image(doc, sheet, table_range, output_path):
     """
-    Select range, export as PDF, convert to PNG.
+    Set print area to table range, export as PDF, convert to PNG.
     """
     # Activate the sheet
     controller = doc.getCurrentController()
     controller.setActiveSheet(sheet)
     
-    # Select the range
-    controller.select(table_range)
-    
     # Force recalculation
     doc.calculateAll()
     
-    # Export as PDF first (SelectionOnly works with PDF)
+    # Get the range address for print area
+    range_address = table_range.getRangeAddress()
+    
+    # Set print area to ONLY this range
+    # Clear any existing print areas first
+    sheet.setPrintAreas(())
+    
+    # Create a new print area with just our range
+    print_area = CellRangeAddress()
+    print_area.Sheet = range_address.Sheet
+    print_area.StartColumn = range_address.StartColumn
+    print_area.StartRow = range_address.StartRow
+    print_area.EndColumn = range_address.EndColumn
+    print_area.EndRow = range_address.EndRow
+    
+    sheet.setPrintAreas((print_area,))
+    
+    # Configure page style for minimal margins
+    style_families = doc.getStyleFamilies()
+    page_styles = style_families.getByName("PageStyles")
+    default_style = page_styles.getByName("Default")
+    
+    # Set minimal margins (in 1/100 mm)
+    default_style.setPropertyValue("LeftMargin", 500)
+    default_style.setPropertyValue("RightMargin", 500)
+    default_style.setPropertyValue("TopMargin", 500)
+    default_style.setPropertyValue("BottomMargin", 500)
+    
+    # Export as PDF
     pdf_path = output_path.replace('.png', '.pdf')
     pdf_url = uno.systemPathToFileUrl(pdf_path)
     
-    # PDF export filter data
-    filter_data = (
-        PropertyValue(Name="Selection", Value=table_range),
-    )
-    
     export_props = (
         PropertyValue(Name="FilterName", Value="calc_pdf_Export"),
-        PropertyValue(Name="FilterData", Value=filter_data),
     )
     
     doc.storeToURL(pdf_url, export_props)
