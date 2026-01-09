@@ -65,16 +65,152 @@ class ExcelVisualRenderer {
    * Convert Excel to PDF using LibreOffice with range selection
    */
   async convertExcelToPDF(inputFile, outputFile, sheetName, range) {
-    // LibreOffice command to convert Excel to PDF
-    // --headless: run without GUI
-    // --convert-to pdf: output format
-    // --outdir: output directory
+    const timestamp = Date.now();
+    const rangeExcelFile = path.join(this.tempDir, `range_${timestamp}.xlsx`);
+    
+    try {
+      // Step 1: Create new Excel file with only the target range
+      await this.createRangeOnlyExcel(inputFile, rangeExcelFile, sheetName, range);
+      
+      // Step 2: Convert the range-only Excel to PDF
+      await this.convertExcelToFullPDF(rangeExcelFile, outputFile);
+      
+      console.log(`Successfully converted Excel range ${sheetName}!${range} to PDF`);
+      
+    } finally {
+      // Cleanup temporary range Excel file
+      try {
+        if (fs.existsSync(rangeExcelFile)) {
+          fs.unlinkSync(rangeExcelFile);
+        }
+      } catch (e) {}
+    }
+  }
+
+  /**
+   * Create a new Excel file containing only the specified range
+   */
+  async createRangeOnlyExcel(inputFile, outputFile, sheetName, range) {
+    const ExcelJS = require('exceljs');
+    
+    // Load the original workbook
+    const sourceWorkbook = new ExcelJS.Workbook();
+    await sourceWorkbook.xlsx.readFile(inputFile);
+    
+    // Find the source sheet
+    let sourceSheet = null;
+    sourceWorkbook.eachSheet((sheet) => {
+      if (sheet.name.toLowerCase() === sheetName.toLowerCase()) {
+        sourceSheet = sheet;
+      }
+    });
+    
+    if (!sourceSheet) {
+      // Try partial match
+      sourceWorkbook.eachSheet((sheet) => {
+        if (sheet.name.toLowerCase().includes(sheetName.toLowerCase()) || 
+            sheetName.toLowerCase().includes(sheet.name.toLowerCase())) {
+          sourceSheet = sheet;
+        }
+      });
+    }
+    
+    if (!sourceSheet) {
+      throw new Error(`Sheet "${sheetName}" not found in workbook`);
+    }
+    
+    // Parse the range (e.g., "A4:N12")
+    const rangeMatch = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
+    if (!rangeMatch) {
+      throw new Error('Invalid range format');
+    }
+    
+    const startCol = this.columnToNumber(rangeMatch[1]);
+    const startRow = parseInt(rangeMatch[2]);
+    const endCol = this.columnToNumber(rangeMatch[3]);
+    const endRow = parseInt(rangeMatch[4]);
+    
+    // Create new workbook with only the range data
+    const targetWorkbook = new ExcelJS.Workbook();
+    const targetSheet = targetWorkbook.addWorksheet('ExtractedRange');
+    
+    // Copy cells from source range to target sheet (starting at A1)
+    let targetRowNum = 1;
+    for (let sourceRowNum = startRow; sourceRowNum <= endRow; sourceRowNum++) {
+      const sourceRow = sourceSheet.getRow(sourceRowNum);
+      const targetRow = targetSheet.getRow(targetRowNum);
+      
+      let targetColNum = 1;
+      for (let sourceColNum = startCol; sourceColNum <= endCol; sourceColNum++) {
+        const sourceCell = sourceRow.getCell(sourceColNum);
+        const targetCell = targetRow.getCell(targetColNum);
+        
+        // Copy cell value
+        targetCell.value = sourceCell.value;
+        
+        // Copy cell styling (font, fill, border, alignment)
+        if (sourceCell.font) targetCell.font = sourceCell.font;
+        if (sourceCell.fill) targetCell.fill = sourceCell.fill;
+        if (sourceCell.border) targetCell.border = sourceCell.border;
+        if (sourceCell.alignment) targetCell.alignment = sourceCell.alignment;
+        if (sourceCell.numFmt) targetCell.numFmt = sourceCell.numFmt;
+        
+        targetColNum++;
+      }
+      targetRowNum++;
+    }
+    
+    // Copy column widths proportionally
+    for (let colIndex = 0; colIndex < (endCol - startCol + 1); colIndex++) {
+      const sourceColNum = startCol + colIndex;
+      const targetColNum = colIndex + 1;
+      
+      const sourceColWidth = sourceSheet.getColumn(sourceColNum).width;
+      if (sourceColWidth) {
+        targetSheet.getColumn(targetColNum).width = sourceColWidth;
+      }
+    }
+    
+    // Copy row heights
+    for (let rowIndex = 0; rowIndex < (endRow - startRow + 1); rowIndex++) {
+      const sourceRowNum = startRow + rowIndex;
+      const targetRowNum = rowIndex + 1;
+      
+      const sourceRowHeight = sourceSheet.getRow(sourceRowNum).height;
+      if (sourceRowHeight) {
+        targetSheet.getRow(targetRowNum).height = sourceRowHeight;
+      }
+    }
+    
+    // Save the range-only Excel file
+    await targetWorkbook.xlsx.writeFile(outputFile);
+    
+    console.log(`Created range-only Excel file: ${range} → ${outputFile}`);
+  }
+
+  /**
+   * Helper function to convert column letter to number
+   */
+  columnToNumber(column) {
+    let result = 0;
+    for (let i = 0; i < column.length; i++) {
+      result = result * 26 + (column.charCodeAt(i) - 'A'.charCodeAt(0) + 1);
+    }
+    return result;
+  }
+
+
+
+  /**
+   * Fallback: Convert entire Excel to PDF
+   */
+  async convertExcelToFullPDF(inputFile, outputFile) {
     const outputDir = path.dirname(outputFile);
     
-    // Basic conversion first (LibreOffice doesn't support range selection directly)
+    // Basic full-sheet conversion
     const convertCmd = `libreoffice --headless --convert-to pdf --outdir "${outputDir}" "${inputFile}"`;
     
-    console.log('Converting Excel to PDF:', convertCmd);
+    console.log('Converting Excel to PDF (full sheet):', convertCmd);
     const { stdout, stderr } = await execAsync(convertCmd);
     
     if (stderr && !stderr.includes('Warning')) {
@@ -94,27 +230,27 @@ class ExcelVisualRenderer {
       throw new Error('LibreOffice failed to generate PDF');
     }
 
-    console.log('Successfully converted Excel to PDF');
+    console.log('Successfully converted Excel to PDF (full sheet fallback)');
   }
 
   /**
    * Convert PDF to PNG with high quality settings
    */
   async convertPDFtoPNG(pdfFile, pngFile) {
-    // Try ImageMagick first (preferred for quality)
-    try {
-      await this.convertPDFtoPNG_ImageMagick(pdfFile, pngFile);
-      return;
-    } catch (error) {
-      console.warn('ImageMagick failed, trying poppler fallback:', error.message);
-    }
-    
-    // Fallback to poppler-utils (pdftoppm)
+    // Try poppler-utils first (more reliable for PDFs)
     try {
       await this.convertPDFtoPNG_Poppler(pdfFile, pngFile);
       return;
     } catch (error) {
-      throw new Error(`Both ImageMagick and poppler failed: ${error.message}`);
+      console.warn('Poppler failed, trying ImageMagick fallback:', error.message);
+    }
+    
+    // Fallback to ImageMagick (may have PDF policy restrictions)
+    try {
+      await this.convertPDFtoPNG_ImageMagick(pdfFile, pngFile);
+      return;
+    } catch (error) {
+      throw new Error(`Both poppler and ImageMagick failed: ${error.message}`);
     }
   }
 
@@ -130,8 +266,13 @@ class ExcelVisualRenderer {
     // [0]: Take first page only
     const convertCmd = `convert -density 300 -quality 95 -background white -alpha remove "${pdfFile}[0]" "${pngFile}"`;
     
-    console.log('Converting PDF to PNG with ImageMagick:', convertCmd);
+    console.log('Converting PDF to PNG with ImageMagick...');
     const { stdout, stderr } = await execAsync(convertCmd);
+    
+    // Check for common PDF policy error
+    if (stderr && stderr.includes('not authorized') && stderr.includes('PDF')) {
+      throw new Error('ImageMagick PDF policy restriction - use poppler instead');
+    }
     
     if (stderr && !stderr.includes('Warning')) {
       console.warn('ImageMagick stderr:', stderr);
@@ -157,10 +298,10 @@ class ExcelVisualRenderer {
     const outputDir = path.dirname(pngFile);
     const convertCmd = `pdftoppm -png -r 300 -f 1 -l 1 -singlefile "${pdfFile}" "${outputDir}/${baseName}"`;
     
-    console.log('Converting PDF to PNG with poppler:', convertCmd);
+    console.log('Converting PDF to PNG with poppler...');
     const { stdout, stderr } = await execAsync(convertCmd);
     
-    if (stderr) {
+    if (stderr && stderr.trim()) {
       console.warn('pdftoppm stderr:', stderr);
     }
 
@@ -178,74 +319,6 @@ class ExcelVisualRenderer {
     console.log('Successfully converted PDF to PNG with poppler');
   }
 
-  /**
-   * Alternative method: Use LibreOffice macro for precise range selection
-   * This is more complex but allows exact range extraction
-   */
-  async renderExcelRangeWithMacro(excelBuffer, sheetName, range, filename = 'screenshot.png') {
-    const timestamp = Date.now();
-    const inputFile = path.join(this.tempDir, `input_${timestamp}.xlsx`);
-    const outputFile = path.join(this.tempDir, `output_${timestamp}.png`);
-    const macroFile = path.join(this.tempDir, `export_range_${timestamp}.bas`);
-
-    try {
-      // Save Excel file
-      fs.writeFileSync(inputFile, excelBuffer);
-
-      // Create LibreOffice Basic macro for range export
-      const macro = this.generateRangeExportMacro(sheetName, range, outputFile);
-      fs.writeFileSync(macroFile, macro);
-
-      // Run LibreOffice with macro
-      const macroCmd = `libreoffice --headless --invisible --macro-execute "${macroFile}" "${inputFile}"`;
-      await execAsync(macroCmd);
-
-      if (!fs.existsSync(outputFile)) {
-        // Fallback to PDF method if macro fails
-        console.log('Macro method failed, falling back to PDF conversion');
-        return await this.renderExcelRange(excelBuffer, sheetName, range, filename);
-      }
-
-      const pngBuffer = fs.readFileSync(outputFile);
-      this.cleanup([inputFile, outputFile, macroFile]);
-      return pngBuffer;
-
-    } catch (error) {
-      console.log('Macro method failed, falling back to PDF conversion:', error.message);
-      this.cleanup([inputFile, outputFile, macroFile]);
-      return await this.renderExcelRange(excelBuffer, sheetName, range, filename);
-    }
-  }
-
-  /**
-   * Generate LibreOffice Basic macro for range export
-   */
-  generateRangeExportMacro(sheetName, range, outputFile) {
-    return `
-Sub ExportRange
-    Dim oDoc As Object
-    Dim oSheet As Object
-    Dim oRange As Object
-    Dim oExportProps(0) As New com.sun.star.beans.PropertyValue
-    
-    ' Open document
-    oDoc = ThisComponent
-    
-    ' Get specific sheet
-    oSheet = oDoc.getSheets().getByName("${sheetName}")
-    
-    ' Select range
-    oRange = oSheet.getCellRangeByName("${range}")
-    
-    ' Set up export properties
-    oExportProps(0).Name = "FilterName"
-    oExportProps(0).Value = "calc_png_Export"
-    
-    ' Export range as PNG
-    oRange.storeToURL("file://${outputFile}", oExportProps())
-End Sub
-    `;
-  }
 
   /**
    * Cleanup temporary files
