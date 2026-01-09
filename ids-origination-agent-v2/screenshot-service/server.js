@@ -1,13 +1,44 @@
+console.log('Starting Excel screenshot service...');
+
 const express = require('express');
-const { spawn } = require('child_process');
+const { spawn, exec, execSync } = require('child_process');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+// Test Python UNO import on startup
+exec('python3 -c "import uno; print(\'UNO import OK\')"', (err, stdout, stderr) => {
+    if (err) {
+        console.error('UNO import FAILED:', stderr);
+    } else {
+        console.log(stdout.trim());
+    }
+});
+
+// Wait for LibreOffice and verify it's running
+setTimeout(() => {
+    try {
+        const result = execSync('ps aux | grep soffice').toString();
+        console.log('LibreOffice processes:', result);
+    } catch (e) {
+        console.error('Cannot check soffice process:', e.message);
+    }
+    
+    try {
+        const result = execSync('netstat -tlnp 2>/dev/null | grep 2002 || ss -tlnp | grep 2002').toString();
+        console.log('Port 2002 status:', result);
+    } catch (e) {
+        console.log('Port 2002: not listening or cannot check');
+    }
+}, 3000);
+
 app.post('/detect-and-capture', async (req, res) => {
     const { excelBase64, tableName, filename } = req.body;
     
+    console.log(`[${new Date().toISOString()}] Request: tableName=${tableName}`);
+    
     if (!excelBase64 || !tableName) {
+        console.log('Request failed: Missing excelBase64 or tableName');
         return res.status(400).json({ 
             success: false, 
             error: 'Missing excelBase64 or tableName' 
@@ -15,9 +46,12 @@ app.post('/detect-and-capture', async (req, res) => {
     }
     
     try {
+        console.log('Calling captureTable...');
         const result = await captureTable(excelBase64, tableName);
+        console.log('captureTable completed:', result.success ? 'SUCCESS' : 'FAILED');
         res.json(result);
     } catch (error) {
+        console.error('captureTable error:', error.message);
         res.status(500).json({ 
             success: false, 
             error: error.message 
@@ -57,6 +91,20 @@ function captureTable(excelBase64, tableName) {
         }, 60000);
     });
 }
+
+app.get('/health', (req, res) => {
+    exec('soffice --version', (error, stdout, stderr) => {
+        res.json({
+            status: 'healthy',
+            service: 'excel-screenshot',
+            visualRenderer: {
+                available: !error,
+                error: error ? error.message : null,
+                version: stdout ? stdout.trim() : null
+            }
+        });
+    });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
