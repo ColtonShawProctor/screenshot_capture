@@ -33,7 +33,7 @@ class ExcelVisualRenderer {
     const timestamp = Date.now();
     const inputFile = path.join(this.tempDir, `input_${timestamp}.xlsx`);
     const pdfFile = path.join(this.tempDir, `output_${timestamp}.pdf`);
-    const pngFile = path.join(this.tempDir, `page_${timestamp}-1.png`);
+    const pngFile = path.join(this.tempDir, `page_${timestamp}.png`);
     const croppedFile = path.join(this.tempDir, `cropped_${timestamp}.png`);
 
     try {
@@ -132,7 +132,7 @@ class ExcelVisualRenderer {
         console.warn('pdftoppm stderr:', stderr);
       }
 
-      // pdftoppm creates filename with -1.png suffix automatically
+      // pdftoppm with -singlefile creates filename with .png (no -1 suffix)
       const popplerOutput = `${outputDir}/${baseName}.png`;
       if (!fs.existsSync(popplerOutput)) {
         throw new Error('pdftoppm failed to generate PNG');
