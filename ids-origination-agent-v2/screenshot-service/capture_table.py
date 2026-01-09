@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Capture Excel table as image using LibreOffice UNO API.
-Finds table by header text, selects the range, exports as PNG.
+Searches ALL sheets for the header text, then exports that range as PNG.
 """
 
 import sys
@@ -10,7 +10,6 @@ import base64
 import tempfile
 import os
 import time
-import subprocess
 
 import uno
 from com.sun.star.beans import PropertyValue
@@ -38,172 +37,119 @@ def connect_to_libreoffice(max_retries=5):
                 raise RuntimeError(f"Cannot connect to LibreOffice: {e}")
 
 
-def find_table_range(sheet, header_text):
+def find_table_in_all_sheets(doc, header_text):
     """
-    Find a table by its header text and return the cell range.
-    Uses LibreOffice's search and expands to find table boundaries.
+    Search ALL sheets for the header text.
+    Returns (sheet, cell_range) or (None, None) if not found.
     """
-    # Create search descriptor
-    search = sheet.createSearchDescriptor()
-    search.SearchString = header_text
-    search.SearchCaseSensitive = False
+    sheets = doc.getSheets()
     
-    found = sheet.findFirst(search)
-    if not found:
-        return None
+    for i in range(sheets.getCount()):
+        sheet = sheets.getByIndex(i)
+        
+        # Create search descriptor
+        search = sheet.createSearchDescriptor()
+        search.SearchString = header_text
+        search.SearchCaseSensitive = False
+        
+        found = sheet.findFirst(search)
+        if found:
+            # Found the header - now expand to get full table
+            table_range = expand_to_table(sheet, found)
+            if table_range:
+                return sheet, table_range
     
-    # Get the starting cell position
-    start_col = found.CellAddress.Column
-    start_row = found.CellAddress.Row
+    return None, None
+
+
+def expand_to_table(sheet, header_cell):
+    """
+    Starting from header cell, expand to find full table boundaries.
+    """
+    start_col = header_cell.CellAddress.Column
+    start_row = header_cell.CellAddress.Row
     
-    # Expand down to find table end (stop at empty row)
-    end_row = start_row
+    # Find table width by scanning header row
     end_col = start_col
-    
-    # First, find the width by scanning the header row
-    cursor = sheet.createCursor()
-    cursor.gotoCell(sheet.getCellByPosition(start_col, start_row), False)
-    
-    # Scan right in header row to find table width
     col = start_col
-    while True:
+    while col < start_col + 50:  # Max 50 columns
         cell = sheet.getCellByPosition(col, start_row)
-        if cell.getType() == 0 and col > start_col:  # EMPTY and not first col
-            # Check if next few columns are also empty (handle gaps)
-            all_empty = True
-            for check_col in range(col, min(col + 3, 100)):
-                if sheet.getCellByPosition(check_col, start_row).getType() != 0:
-                    all_empty = False
-                    break
-            if all_empty:
+        cell_type = cell.getType()  # 0=EMPTY, 1=VALUE, 2=STRING, 3=FORMULA
+        cell_str = cell.getString().strip()
+        
+        if col > start_col and cell_type == 0 and not cell_str:
+            # Empty cell - check if next 2 are also empty (end of table)
+            next_empty = True
+            for check in range(1, 3):
+                if col + check < start_col + 50:
+                    next_cell = sheet.getCellByPosition(col + check, start_row)
+                    if next_cell.getType() != 0 or next_cell.getString().strip():
+                        next_empty = False
+                        break
+            if next_empty:
                 break
-        end_col = col
+        
+        if cell_type != 0 or cell_str:
+            end_col = col
         col += 1
-        if col > 100:  # Safety limit
-            break
     
-    # Scan down to find table height
+    # Find table height by scanning down
+    end_row = start_row
     row = start_row
     consecutive_empty = 0
-    while consecutive_empty < 2:  # Allow 1 empty row within table
+    
+    while row < start_row + 100 and consecutive_empty < 2:  # Max 100 rows
         row += 1
-        if row > 500:  # Safety limit
-            break
         
-        # Check if entire row in table range is empty
-        row_empty = True
+        # Check if entire row is empty
+        row_has_content = False
         for c in range(start_col, end_col + 1):
             cell = sheet.getCellByPosition(c, row)
             if cell.getType() != 0 or cell.getString().strip():
-                row_empty = False
+                row_has_content = True
                 break
         
-        if row_empty:
-            consecutive_empty += 1
-        else:
-            consecutive_empty = 0
+        if row_has_content:
             end_row = row
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
     
-    # Return the range
     return sheet.getCellRangeByPosition(start_col, start_row, end_col, end_row)
 
 
-def export_range_as_image(desktop, excel_path, sheet_name, header_text, output_path):
+def export_range_as_image(doc, sheet, table_range, output_path):
     """
-    Open Excel, find table by header, export as PNG.
+    Select range and export as PNG.
     """
-    # Load the document (hidden)
-    file_url = uno.systemPathToFileUrl(excel_path)
-    load_props = (
-        PropertyValue(Name="Hidden", Value=True),
-        PropertyValue(Name="ReadOnly", Value=True),
+    # Activate the sheet
+    controller = doc.getCurrentController()
+    controller.setActiveSheet(sheet)
+    
+    # Select the range
+    controller.select(table_range)
+    
+    # Force recalculation
+    doc.calculateAll()
+    
+    # Export as PNG with selection only
+    output_url = uno.systemPathToFileUrl(output_path)
+    
+    export_props = (
+        PropertyValue(Name="FilterName", Value="calc_png_Export"),
+        PropertyValue(Name="SelectionOnly", Value=True),
     )
     
-    doc = desktop.loadComponentFromURL(file_url, "_blank", 0, load_props)
-    
-    if not doc:
-        raise RuntimeError("Failed to open document")
-    
-    try:
-        # Get the sheet
-        sheets = doc.getSheets()
-        sheet = None
-        
-        # Try exact match first
-        if sheets.hasByName(sheet_name):
-            sheet = sheets.getByName(sheet_name)
-        else:
-            # Try with/without trailing space
-            for i in range(sheets.getCount()):
-                s = sheets.getByIndex(i)
-                if s.getName().strip() == sheet_name.strip():
-                    sheet = s
-                    break
-        
-        if not sheet:
-            # If sheet not found, search all sheets for the header
-            for i in range(sheets.getCount()):
-                s = sheets.getByIndex(i)
-                test_range = find_table_range(s, header_text)
-                if test_range:
-                    sheet = s
-                    break
-        
-        if not sheet:
-            raise RuntimeError(f"Sheet '{sheet_name}' not found")
-        
-        # Activate the sheet
-        controller = doc.getCurrentController()
-        controller.setActiveSheet(sheet)
-        
-        # Find the table
-        table_range = find_table_range(sheet, header_text)
-        if not table_range:
-            raise RuntimeError(f"Table with header '{header_text}' not found")
-        
-        # Select the range
-        controller.select(table_range)
-        
-        # Force recalculation
-        doc.calculateAll()
-        
-        # Export as PNG with selection only
-        output_url = uno.systemPathToFileUrl(output_path)
-        
-        # Configure export - high quality PNG of selection only
-        filter_data = PropertyValue(Name="PixelWidth", Value=1200)
-        filter_data2 = PropertyValue(Name="PixelHeight", Value=900)
-        
-        export_props = (
-            PropertyValue(Name="FilterName", Value="calc_png_Export"),
-            PropertyValue(Name="SelectionOnly", Value=True),
-        )
-        
-        doc.storeToURL(output_url, export_props)
-        
-    finally:
-        doc.close(True)
+    doc.storeToURL(output_url, export_props)
 
 
 def main():
-    """Main entry point - read JSON from stdin, output result to stdout."""
+    """Main entry point."""
     try:
         input_data = json.load(sys.stdin)
         
         excel_base64 = input_data['excelBase64']
         table_name = input_data['tableName']
-        
-        # Map table names to likely sheet names
-        sheet_mapping = {
-            'Sources and Uses': 'S&U ',
-            'Take Out Loan Sizing': 'S&U ',
-            'Capital Stack at Closing': 'S&U ',
-            'Loan to Cost': 'LTC and LTV Calcs',
-            'Loan to Value': 'LTC and LTV Calcs',
-            'PILOT Schedule': 'S&U ',
-        }
-        
-        sheet_name = sheet_mapping.get(table_name, 'S&U ')
         
         # Save Excel to temp file
         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
@@ -216,18 +162,44 @@ def main():
             # Connect to LibreOffice
             desktop = connect_to_libreoffice()
             
-            # Export the table
-            export_range_as_image(desktop, excel_path, sheet_name, table_name, output_path)
+            # Open the document
+            file_url = uno.systemPathToFileUrl(excel_path)
+            load_props = (
+                PropertyValue(Name="Hidden", Value=True),
+                PropertyValue(Name="ReadOnly", Value=True),
+            )
+            doc = desktop.loadComponentFromURL(file_url, "_blank", 0, load_props)
             
-            # Read result and return
-            with open(output_path, 'rb') as f:
-                image_base64 = base64.b64encode(f.read()).decode('utf-8')
+            if not doc:
+                raise RuntimeError("Failed to open document")
             
-            print(json.dumps({
-                'success': True,
-                'image': image_base64
-            }))
-            
+            try:
+                # Search ALL sheets for the table header
+                sheet, table_range = find_table_in_all_sheets(doc, table_name)
+                
+                if not sheet or not table_range:
+                    # Table not found - return gracefully
+                    print(json.dumps({
+                        'success': False,
+                        'error': f"Table '{table_name}' not found in any sheet"
+                    }))
+                    return
+                
+                # Export the range
+                export_range_as_image(doc, sheet, table_range, output_path)
+                
+                # Read result
+                with open(output_path, 'rb') as f:
+                    image_base64 = base64.b64encode(f.read()).decode('utf-8')
+                
+                print(json.dumps({
+                    'success': True,
+                    'image': image_base64
+                }))
+                
+            finally:
+                doc.close(True)
+                
         finally:
             # Cleanup
             if os.path.exists(excel_path):
