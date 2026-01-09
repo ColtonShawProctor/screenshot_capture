@@ -39,15 +39,26 @@ def connect_to_libreoffice(max_retries=5):
                 raise RuntimeError(f"Cannot connect to LibreOffice: {e}")
 
 
+def clear_all_print_areas(doc):
+    """Clear print areas from ALL sheets to prevent accumulation."""
+    sheets = doc.getSheets()
+    for i in range(sheets.getCount()):
+        sheet = sheets.getByIndex(i)
+        sheet.setPrintAreas(())  # Empty tuple clears
+
+
 def find_table_in_all_sheets(doc, header_text):
     """
-    Search ALL sheets for the header text.
+    Search ALL sheets for the header text with debug logging.
     Returns (sheet, cell_range) or (None, None) if not found.
     """
     sheets = doc.getSheets()
     
+    print(f"Searching for '{header_text}' in {sheets.getCount()} sheets", file=sys.stderr)
+    
     for i in range(sheets.getCount()):
         sheet = sheets.getByIndex(i)
+        sheet_name = sheet.getName()
         
         # Create search descriptor
         search = sheet.createSearchDescriptor()
@@ -56,10 +67,17 @@ def find_table_in_all_sheets(doc, header_text):
         
         found = sheet.findFirst(search)
         if found:
+            cell_addr = found.getCellAddress()
+            print(f"  Found in '{sheet_name}' at row {cell_addr.Row}, col {cell_addr.Column}", file=sys.stderr)
+            
             # Found the header - now expand to get full table
             table_range = expand_to_table(sheet, found)
             if table_range:
                 return sheet, table_range
+            else:
+                print(f"  Could not expand to valid table range in '{sheet_name}'", file=sys.stderr)
+        else:
+            print(f"  Not found in '{sheet_name}'", file=sys.stderr)
     
     return None, None
 
@@ -70,6 +88,8 @@ def expand_to_table(sheet, header_cell):
     """
     start_col = header_cell.CellAddress.Column
     start_row = header_cell.CellAddress.Row
+    
+    print(f"  Expanding table from row {start_row}, col {start_col}", file=sys.stderr)
     
     # Find table width by scanning header row
     end_col = start_col
@@ -116,6 +136,8 @@ def expand_to_table(sheet, header_cell):
             consecutive_empty = 0
         else:
             consecutive_empty += 1
+    
+    print(f"  Table range: cols {start_col}-{end_col}, rows {start_row}-{end_row}", file=sys.stderr)
     
     return sheet.getCellRangeByPosition(start_col, start_row, end_col, end_row)
 
@@ -186,6 +208,39 @@ def export_range_as_image(doc, sheet, table_range, output_path):
         os.unlink(pdf_path)
 
 
+def capture_single_table(desktop, excel_path, table_name, output_path):
+    """Open doc, capture ONE table, close doc."""
+    
+    # Open fresh document
+    file_url = uno.systemPathToFileUrl(excel_path)
+    load_props = (
+        PropertyValue(Name="Hidden", Value=True),
+        PropertyValue(Name="ReadOnly", Value=True),
+    )
+    doc = desktop.loadComponentFromURL(file_url, "_blank", 0, load_props)
+    
+    if not doc:
+        raise RuntimeError("Failed to open document")
+    
+    try:
+        # Clear ALL print areas on ALL sheets first
+        clear_all_print_areas(doc)
+        
+        # Find and capture the table
+        sheet, table_range = find_table_in_all_sheets(doc, table_name)
+        
+        if not sheet or not table_range:
+            return False, f"Table '{table_name}' not found in any sheet"
+        
+        # Export the range
+        export_range_as_image(doc, sheet, table_range, output_path)
+        
+        return True, "Success"
+        
+    finally:
+        doc.close(True)  # ALWAYS close
+
+
 def main():
     """Main entry point."""
     try:
@@ -205,44 +260,25 @@ def main():
             # Connect to LibreOffice
             desktop = connect_to_libreoffice()
             
-            # Open the document
-            file_url = uno.systemPathToFileUrl(excel_path)
-            load_props = (
-                PropertyValue(Name="Hidden", Value=True),
-                PropertyValue(Name="ReadOnly", Value=True),
-            )
-            doc = desktop.loadComponentFromURL(file_url, "_blank", 0, load_props)
+            # Capture single table with fresh document
+            success, message = capture_single_table(desktop, excel_path, table_name, output_path)
             
-            if not doc:
-                raise RuntimeError("Failed to open document")
-            
-            try:
-                # Search ALL sheets for the table header
-                sheet, table_range = find_table_in_all_sheets(doc, table_name)
-                
-                if not sheet or not table_range:
-                    # Table not found - return gracefully
-                    print(json.dumps({
-                        'success': False,
-                        'error': f"Table '{table_name}' not found in any sheet"
-                    }))
-                    return
-                
-                # Export the range
-                export_range_as_image(doc, sheet, table_range, output_path)
-                
-                # Read result
-                with open(output_path, 'rb') as f:
-                    image_base64 = base64.b64encode(f.read()).decode('utf-8')
-                
+            if not success:
                 print(json.dumps({
-                    'success': True,
-                    'image': image_base64
+                    'success': False,
+                    'error': message
                 }))
-                
-            finally:
-                doc.close(True)
-                
+                return
+            
+            # Read result
+            with open(output_path, 'rb') as f:
+                image_base64 = base64.b64encode(f.read()).decode('utf-8')
+            
+            print(json.dumps({
+                'success': True,
+                'image': image_base64
+            }))
+            
         finally:
             # Cleanup
             if os.path.exists(excel_path):

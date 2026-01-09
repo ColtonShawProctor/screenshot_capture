@@ -94,7 +94,7 @@ function captureTable(excelBase64, tableName) {
         
         python.stdout.on('data', (data) => { 
             stdout += data; 
-            console.log(`STDOUT: ${data}`);
+            // Remove this line - don't log raw stdout
         });
         python.stderr.on('data', (data) => { 
             stderr += data;
@@ -102,18 +102,23 @@ function captureTable(excelBase64, tableName) {
         });
         
         python.on('close', (code) => {
-            console.log(`Python exited with code ${code}`);
-            console.log(`Full stdout: ${stdout}`);
-            console.log(`Full stderr: ${stderr}`);
+            // Parse and log summary ONLY
+            let result;
+            try {
+                result = JSON.parse(stdout);
+                console.log(`[${tableName}] success=${result.success}, hasImage=${!!result.image}, error=${result.error || 'none'}`);
+            } catch (e) {
+                console.log(`[${tableName}] Failed to parse response, stdout length: ${stdout.length}`);
+            }
             
-            if (code === 0 && stdout) {
-                try {
-                    resolve(JSON.parse(stdout));
-                } catch (e) {
-                    reject(new Error(`Invalid JSON: ${stdout}`));
-                }
+            if (stderr) {
+                console.log(`[${tableName}] stderr: ${stderr}`);
+            }
+            
+            if (code === 0 && result) {
+                resolve(result);
             } else {
-                reject(new Error(stderr || stdout || `Exit code ${code}`));
+                reject(new Error(result?.error || stderr || `Exit code ${code}`));
             }
         });
         
