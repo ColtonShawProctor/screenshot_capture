@@ -84,43 +84,43 @@ def find_table_in_all_sheets(doc, header_text):
 
 def expand_to_table(sheet, header_cell, table_name):
     """
-    Find table boundaries using table-specific max widths
-    and scanning DATA rows instead of header row.
+    Find table boundaries using table-specific fixed widths
+    and scanning for height.
     """
     start_col = header_cell.CellAddress.Column
     start_row = header_cell.CellAddress.Row
     
-    # Table-specific max widths (known from analysis)
-    max_widths = {
+    # Table-specific FIXED widths (use these exactly for known tables)
+    fixed_widths = {
         'Sources and Uses': 7,
-        'Take Out Loan Sizing': 5,  # Was 3, increased
-        'Capital Stack at Closing': 8,  # Was 7, increased  
+        'Take Out Loan Sizing': 3,  # J, K, L columns
+        'Capital Stack at Closing': 7,
         'Loan to Cost': 7,
         'Loan to Value': 7,
         'PILOT Schedule': 8,
     }
     
-    max_cols = max_widths.get(table_name, 8)  # Default 8
-    max_rows = 30  # No table is taller than 30 rows
-    
     print(f"  Expanding '{table_name}' from row {start_row}, col {start_col}", file=sys.stderr)
-    print(f"  Max dimensions: {max_cols} cols x {max_rows} rows", file=sys.stderr)
     
-    # Find width by scanning a DATA row (2-3 rows after header)
-    # Not the header row which may have merged cells
-    data_row = start_row + 2
-    end_col = start_col
-    
-    for col in range(start_col, start_col + max_cols):
-        cell = sheet.getCellByPosition(col, data_row)
-        if cell.getString().strip():
-            end_col = col
-    
-    # Ensure minimum width of 2 columns
-    if end_col == start_col:
-        end_col = start_col + max_cols - 1
+    # For known tables, USE the fixed width
+    if table_name in fixed_widths:
+        end_col = start_col + fixed_widths[table_name] - 1
+        print(f"  Using fixed width: {fixed_widths[table_name]} columns", file=sys.stderr)
+    else:
+        # For unknown tables, scan for content
+        end_col = start_col
+        for col in range(start_col, start_col + 10):
+            cell = sheet.getCellByPosition(col, start_row)
+            if cell.getString().strip():
+                end_col = col
+            else:
+                break
+        # Ensure minimum width of 2 columns
+        if end_col == start_col:
+            end_col = start_col + 1
     
     # Find height - stop at first fully empty row
+    max_rows = 30
     end_row = start_row
     for row in range(start_row + 1, start_row + max_rows):
         row_has_content = False
