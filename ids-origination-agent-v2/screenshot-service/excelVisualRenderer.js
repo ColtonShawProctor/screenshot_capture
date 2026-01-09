@@ -93,8 +93,9 @@ class ExcelVisualRenderer {
   async createRangeOnlyExcel(inputFile, outputFile, sheetName, range) {
     const ExcelJS = require('exceljs');
     
-    // Load the original workbook
+    // Load the original workbook with formula calculation
     const sourceWorkbook = new ExcelJS.Workbook();
+    sourceWorkbook.calcProperties = { fullCalcOnLoad: true };
     await sourceWorkbook.xlsx.readFile(inputFile);
     
     // Find the source sheet
@@ -134,7 +135,29 @@ class ExcelVisualRenderer {
     const targetWorkbook = new ExcelJS.Workbook();
     const targetSheet = targetWorkbook.addWorksheet('ExtractedRange');
     
+    // First, identify all merges in the source range
+    const sourceMerges = [];
+    sourceSheet._merges.forEach(merge => {
+      const [startAddr, endAddr] = merge.split(':');
+      const mergeStartCell = sourceSheet.getCell(startAddr);
+      const mergeEndCell = sourceSheet.getCell(endAddr);
+      
+      // Check if merge intersects with our range
+      if (mergeStartCell.row <= endRow && mergeEndCell.row >= startRow &&
+          mergeStartCell.col <= endCol && mergeEndCell.col >= startCol) {
+        sourceMerges.push({
+          startRow: Math.max(mergeStartCell.row, startRow),
+          endRow: Math.min(mergeEndCell.row, endRow),
+          startCol: Math.max(mergeStartCell.col, startCol),
+          endCol: Math.min(mergeEndCell.col, endCol),
+          masterRow: mergeStartCell.row,
+          masterCol: mergeStartCell.col
+        });
+      }
+    });
+    
     // Copy cells from source range to target sheet (starting at A1)
+    const processedMasters = new Set();
     let targetRowNum = 1;
     for (let sourceRowNum = startRow; sourceRowNum <= endRow; sourceRowNum++) {
       const sourceRow = sourceSheet.getRow(sourceRowNum);
@@ -145,8 +168,45 @@ class ExcelVisualRenderer {
         const sourceCell = sourceRow.getCell(sourceColNum);
         const targetCell = targetRow.getCell(targetColNum);
         
+        // Handle merged cells
+        let cellValue = sourceCell.value;
+        if (sourceCell.isMerged) {
+          // Find the merge this cell belongs to
+          const merge = sourceMerges.find(m => 
+            sourceRowNum >= m.startRow && sourceRowNum <= m.endRow &&
+            sourceColNum >= m.startCol && sourceColNum <= m.endCol
+          );
+          
+          if (merge) {
+            const masterId = `${merge.masterRow}_${merge.masterCol}`;
+            const masterCell = sourceSheet.getCell(merge.masterRow, merge.masterCol);
+            
+            // Only copy value from master cell, others get empty
+            if (sourceRowNum === merge.masterRow && sourceColNum === merge.masterCol) {
+              cellValue = masterCell.value;
+              processedMasters.add(masterId);
+            } else if (processedMasters.has(masterId)) {
+              cellValue = null; // Already processed the master
+            } else {
+              cellValue = masterCell.value;
+            }
+          }
+        }
+        
+        // Handle formula errors
+        if (cellValue && typeof cellValue === 'object' && cellValue.formula) {
+          const result = cellValue.result;
+          if (result && (String(result).includes('#NAME?') || 
+                         String(result).includes('#REF!') ||
+                         String(result).includes('#VALUE!'))) {
+            cellValue = ''; // Replace formula errors with empty
+          } else {
+            cellValue = result; // Use calculated result
+          }
+        }
+        
         // Copy cell value
-        targetCell.value = sourceCell.value;
+        targetCell.value = cellValue;
         
         // Copy cell styling (font, fill, border, alignment)
         if (sourceCell.font) targetCell.font = sourceCell.font;
@@ -159,6 +219,22 @@ class ExcelVisualRenderer {
       }
       targetRowNum++;
     }
+    
+    // Recreate merges in target sheet with adjusted coordinates
+    sourceMerges.forEach(merge => {
+      const targetStartRow = merge.startRow - startRow + 1;
+      const targetEndRow = merge.endRow - startRow + 1;
+      const targetStartCol = merge.startCol - startCol + 1;
+      const targetEndCol = merge.endCol - startCol + 1;
+      
+      if (targetStartRow > 0 && targetEndRow > 0 && 
+          targetStartCol > 0 && targetEndCol > 0 &&
+          targetStartRow <= targetEndRow && targetStartCol <= targetEndCol) {
+        const startCell = targetSheet.getCell(targetStartRow, targetStartCol);
+        const endCell = targetSheet.getCell(targetEndRow, targetEndCol);
+        targetSheet.mergeCells(`${startCell.address}:${endCell.address}`);
+      }
+    });
     
     // Copy column widths proportionally
     for (let colIndex = 0; colIndex < (endCol - startCol + 1); colIndex++) {

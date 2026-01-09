@@ -1,7 +1,7 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
 const nodeHtmlToImage = require('node-html-to-image');
-const { detectTable } = require('./tableDetector');
+const { detectTable } = require('./tableDetectorV2');
 const ExcelVisualRenderer = require('./excelVisualRenderer');
 
 const app = express();
