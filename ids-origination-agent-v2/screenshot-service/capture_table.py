@@ -84,48 +84,59 @@ def find_table_in_all_sheets(doc, header_text):
 
 def expand_to_table(sheet, header_cell):
     """
-    Starting from header cell, expand to find table boundaries.
-    Stop when we hit truly empty rows/columns.
+    Find table boundaries using strict rules:
+    1. Max 15 columns (no financial table is wider)
+    2. Max 40 rows
+    3. Stop at FIRST truly empty cell in header row
+    4. Stop at FIRST fully empty row
     """
     start_col = header_cell.CellAddress.Column
     start_row = header_cell.CellAddress.Row
     
     print(f"  Expanding table from row {start_row}, col {start_col}", file=sys.stderr)
     
-    # Find table width - scan right until 2+ consecutive empty cells in header row
+    # Find table width - stop at FIRST empty cell in header row
     end_col = start_col
-    empty_count = 0
-    for col in range(start_col, start_col + 30):  # Max 30 cols
+    for col in range(start_col + 1, start_col + 15):  # Max 15 columns
         cell = sheet.getCellByPosition(col, start_row)
-        has_content = cell.getString().strip() != '' or cell.getType() != 0
+        value = cell.getString().strip()
         
-        if has_content:
-            end_col = col
-            empty_count = 0
-        else:
-            empty_count += 1
-            if empty_count >= 2:  # 2 consecutive empty = end of table
-                break
+        # If cell is empty, stop (don't skip over gaps)
+        if not value:
+            break
+        end_col = col
     
-    # Find table height - scan down until 2+ consecutive fully empty rows
+    # Find table height - stop at FIRST fully empty row
     end_row = start_row
-    empty_rows = 0
-    for row in range(start_row + 1, start_row + 50):  # Max 50 rows
-        # Check if ANY cell in this row (within table width) has content
+    for row in range(start_row + 1, start_row + 40):  # Max 40 rows
+        # Check first column of table for content
+        first_cell = sheet.getCellByPosition(start_col, row)
+        first_val = first_cell.getString().strip()
+        
+        # Also check if ANY cell in the row has content
         row_has_content = False
         for col in range(start_col, end_col + 1):
             cell = sheet.getCellByPosition(col, row)
-            if cell.getString().strip() != '' or cell.getType() != 0:
+            if cell.getString().strip():
                 row_has_content = True
                 break
         
-        if row_has_content:
-            end_row = row
-            empty_rows = 0
-        else:
-            empty_rows += 1
-            if empty_rows >= 2:  # 2 consecutive empty rows = end of table
+        if not row_has_content:
+            # Found empty row - but check if next row also empty (end of table)
+            # or if it's just a spacer row
+            if row + 1 < start_row + 40:
+                next_row_has_content = False
+                for col in range(start_col, end_col + 1):
+                    cell = sheet.getCellByPosition(col, row + 1)
+                    if cell.getString().strip():
+                        next_row_has_content = True
+                        break
+                if not next_row_has_content:
+                    break  # Two empty rows = end of table
+            else:
                 break
+        else:
+            end_row = row
     
     print(f"  Table range: cols {start_col}-{end_col}, rows {start_row}-{end_row}", file=sys.stderr)
     
