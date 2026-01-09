@@ -126,6 +126,8 @@ function isCellEmpty(cell) {
   // Handle formula cells
   if (typeof value === 'object' && value.formula) {
     const result = value.result;
+    // Treat #NAME? errors as empty
+    if (result && String(result).includes('#NAME?')) return true;
     return !result || String(result).trim() === '';
   }
   
@@ -133,28 +135,63 @@ function isCellEmpty(cell) {
   return String(value).trim() === '';
 }
 
-// Get cell display value
-function getCellValue(cell) {
+// Get cell display value without duplication from merged cells
+function getCellValue(cell, visitedMerges = new Set()) {
   if (!cell || !cell.value) return '';
+  
+  // Handle merged cells - only get value from master cell
+  if (cell.isMerged && cell.master && cell.master !== cell) {
+    // Avoid infinite recursion
+    const mergeId = `${cell.master.row}_${cell.master.col}`;
+    if (visitedMerges.has(mergeId)) return '';
+    visitedMerges.add(mergeId);
+    return getCellValue(cell.master, visitedMerges);
+  }
   
   const value = cell.value;
   
   // Handle formula cells
   if (typeof value === 'object' && value.formula) {
-    return String(value.result || '');
-  }
-  
-  // Handle merged cells
-  if (cell.isMerged && cell.master && cell.master !== cell) {
-    return getCellValue(cell.master);
+    const result = value.result || '';
+    // Handle formula errors gracefully
+    if (String(result).includes('#NAME?') || String(result).includes('#REF!')) {
+      return '';
+    }
+    return String(result);
   }
   
   return String(value);
 }
 
+// Get merged cell range if the cell is part of a merge
+function getMergedRange(worksheet, cell) {
+  if (!cell.isMerged) return null;
+  
+  // Find the merge that contains this cell
+  for (const merge of worksheet._merges) {
+    const [startAddr, endAddr] = merge.split(':');
+    const startCell = worksheet.getCell(startAddr);
+    const endCell = worksheet.getCell(endAddr);
+    
+    if (cell.row >= startCell.row && cell.row <= endCell.row &&
+        cell.col >= startCell.col && cell.col <= endCell.col) {
+      return {
+        startRow: startCell.row,
+        endRow: endCell.row,
+        startCol: startCell.col,
+        endCol: endCell.col,
+        master: worksheet.getCell(startCell.row, startCell.col)
+      };
+    }
+  }
+  
+  return null;
+}
+
 // Find table header in worksheet
 function findTableHeader(worksheet, tableName, maxRows = 200, maxCols = 30) {
   const matches = [];
+  const processedMerges = new Set();
   
   // Get all variations of the table name
   const variations = TABLE_MAPPINGS[tableName] || [tableName.toLowerCase()];
@@ -164,6 +201,19 @@ function findTableHeader(worksheet, tableName, maxRows = 200, maxCols = 30) {
   for (let row = 1; row <= Math.min(maxRows, worksheet.rowCount); row++) {
     for (let col = 1; col <= Math.min(maxCols, worksheet.columnCount); col++) {
       const cell = worksheet.getCell(row, col);
+      
+      // Skip if this cell is part of an already processed merge
+      if (cell.isMerged) {
+        const mergeRange = getMergedRange(worksheet, cell);
+        if (mergeRange) {
+          const mergeId = `${mergeRange.startRow}_${mergeRange.startCol}`;
+          if (processedMerges.has(mergeId)) continue;
+          processedMerges.add(mergeId);
+          // Use the master cell for merged cells
+          if (cell !== mergeRange.master) continue;
+        }
+      }
+      
       const cellValue = getCellValue(cell);
       
       if (!cellValue) continue;
@@ -190,7 +240,45 @@ function findTableHeader(worksheet, tableName, maxRows = 200, maxCols = 30) {
   return matches[0] || null;
 }
 
-// Find table boundaries from header
+// Check if this looks like table data (not headers or random values)
+function isTableData(value, cell) {
+  if (!value || value.trim() === '') return false;
+  
+  const trimmedValue = value.trim();
+  
+  // Currency/number patterns
+  if (/^\$?[\d,]+\.?\d*$/.test(trimmedValue)) return true;
+  if (/^-?\$?[\d,]+\.?\d*$/.test(trimmedValue)) return true; // Negative numbers
+  if (/^\d+\.?\d*%?$/.test(trimmedValue)) return true; // Percentages
+  if (/^[\(\)]?\$?[\d,]+\.?\d*[\(\)]?$/.test(trimmedValue)) return true; // Accounting format
+  
+  // Common table row labels
+  const lowerValue = trimmedValue.toLowerCase();
+  if (lowerValue.includes('total') || 
+      lowerValue.includes('subtotal') ||
+      lowerValue.includes('loan') ||
+      lowerValue.includes('equity') ||
+      lowerValue.includes('cost') ||
+      lowerValue.includes('value')) {
+    return true;
+  }
+  
+  // Text that's likely a row label (not too short, not a cell reference)
+  if (trimmedValue.length > 3 && !/^[A-Z]\d+$/.test(trimmedValue)) {
+    // Check if it has table-like formatting (bold, borders, etc.)
+    if (cell && (cell.font?.bold || cell.border)) {
+      return true;
+    }
+    // Common patterns for table data
+    if (/^[A-Za-z\s\-&\/]+$/.test(trimmedValue) && trimmedValue.length < 50) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// Find table boundaries from header - IMPROVED VERSION
 function findTableBoundaries(worksheet, headerMatch, padding = 1) {
   const { row: headerRow, col: headerCol } = headerMatch;
   
@@ -200,152 +288,158 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
   let topRow = headerRow;
   let bottomRow = headerRow;
   
-  // Find left boundary - look for empty column(s) to the left
-  for (let col = headerCol - 1; col >= 1; col--) {
-    let hasTableData = false;
+  // For two-sided tables (like Sources & Uses), we need to detect gaps
+  let gapCols = [];
+  let hasSignificantGap = false;
+  
+  // Step 1: Find the actual header row extent (might be merged cells)
+  const headerCell = worksheet.getCell(headerRow, headerCol);
+  if (headerCell.isMerged) {
+    const mergeRange = getMergedRange(worksheet, headerCell);
+    if (mergeRange) {
+      leftCol = Math.min(leftCol, mergeRange.startCol);
+      rightCol = Math.max(rightCol, mergeRange.endCol);
+    }
+  }
+  
+  // Step 2: Find left boundary - look for start of table data
+  let foundDataLeft = false;
+  for (let col = headerCol; col >= 1; col--) {
+    let hasData = false;
     
-    // Check if this column has table-related data (not just random cells)
-    for (let r = headerRow; r <= Math.min(headerRow + 20, worksheet.rowCount); r++) {
+    // Check multiple rows below header
+    for (let r = headerRow; r <= Math.min(headerRow + 10, worksheet.rowCount); r++) {
       const cell = worksheet.getCell(r, col);
-      const value = getCellValue(cell).trim();
+      const value = getCellValue(cell);
       
-      if (value && !isCellEmpty(cell)) {
-        // Check if it looks like table data (not just a random value)
-        const isTableData = 
-          /^\$?[\d,]+\.?\d*$/.test(value) || // Currency/number
-          /^\d+\.?\d*%?$/.test(value) ||    // Percentage
-          value.toLowerCase().includes('total') ||
-          value.toLowerCase().includes('subtotal') ||
-          value.length > 3; // Text labels
-          
-        if (isTableData) {
-          hasTableData = true;
-          break;
-        }
+      if (isTableData(value, cell)) {
+        hasData = true;
+        leftCol = col;
+        foundDataLeft = true;
+        break;
       }
     }
     
-    if (hasTableData) {
-      leftCol = col;
-    } else {
-      // Hit empty column - stop here
+    if (!hasData && foundDataLeft) {
+      // Found the edge
       break;
     }
   }
   
-  // Find right boundary - look for empty column(s) to the right
-  let emptyColCount = 0;
-  for (let col = headerCol + 1; col <= Math.min(headerCol + 15, worksheet.columnCount); col++) {
-    let hasTableData = false;
+  // Step 3: Find right boundary - handle two-sided tables with gaps
+  let consecutiveEmptyCols = 0;
+  let rightmostDataCol = headerCol;
+  
+  for (let col = headerCol; col <= Math.min(worksheet.columnCount, headerCol + 20); col++) {
+    let hasData = false;
     
-    // Check if this column has table-related data
-    for (let r = headerRow; r <= Math.min(headerRow + 20, worksheet.rowCount); r++) {
+    // Check if column has data
+    for (let r = headerRow; r <= Math.min(headerRow + 10, worksheet.rowCount); r++) {
       const cell = worksheet.getCell(r, col);
-      const value = getCellValue(cell).trim();
+      const value = getCellValue(cell);
       
-      if (value && !isCellEmpty(cell)) {
-        // Check if it looks like table data
-        const isTableData = 
-          /^\$?[\d,]+\.?\d*$/.test(value) || // Currency/number
-          /^\d+\.?\d*%?$/.test(value) ||    // Percentage
-          value.toLowerCase().includes('total') ||
-          value.toLowerCase().includes('subtotal') ||
-          (value.length > 3 && !/^[A-Z]\d+$/.test(value)); // Text labels (not cell references)
-          
-        if (isTableData) {
-          hasTableData = true;
-          break;
-        }
+      if (isTableData(value, cell)) {
+        hasData = true;
+        break;
       }
     }
     
-    if (hasTableData) {
-      rightCol = col;
-      emptyColCount = 0;
+    if (hasData) {
+      rightmostDataCol = col;
+      consecutiveEmptyCols = 0;
+      
+      // Check if we've crossed a significant gap (for two-sided tables)
+      if (gapCols.length > 0 && col - gapCols[gapCols.length - 1] > 1) {
+        hasSignificantGap = true;
+      }
     } else {
-      emptyColCount++;
-      // Stop after 2 consecutive empty columns
-      if (emptyColCount >= 2) break;
+      consecutiveEmptyCols++;
+      gapCols.push(col);
+      
+      // For two-sided tables, continue looking after a gap
+      if (consecutiveEmptyCols <= 3 && col < headerCol + 15) {
+        continue;
+      } else if (!hasSignificantGap) {
+        // No significant gap found, so this is the end
+        break;
+      }
     }
   }
   
-  // Find top boundary - check for header rows above
-  for (let row = headerRow - 1; row >= Math.max(1, headerRow - 5); row--) {
-    let hasHeaderData = false;
+  rightCol = rightmostDataCol;
+  
+  // Step 4: Find top boundary - look for additional header rows
+  for (let row = headerRow - 1; row >= Math.max(1, headerRow - 3); row--) {
+    let hasHeaderContent = false;
     
-    // Check if this row has table headers
     for (let col = leftCol; col <= rightCol; col++) {
-      const cell = worksheet.getCell(row, col);
-      const value = getCellValue(cell).trim();
+      if (gapCols.includes(col)) continue;
       
-      if (value) {
-        // Check if it looks like a header
-        const isHeader = 
-          (cell.font && cell.font.bold) ||
+      const cell = worksheet.getCell(row, col);
+      const value = getCellValue(cell);
+      
+      if (value && (cell.font?.bold || cell.fill || 
           value.toLowerCase().includes('source') ||
           value.toLowerCase().includes('use') ||
-          value.toLowerCase().includes('amount') ||
-          value.toLowerCase().includes('rate') ||
-          value.toLowerCase().includes('value') ||
-          value.toLowerCase().includes('cost');
-          
-        if (isHeader) {
-          hasHeaderData = true;
-          break;
-        }
+          value.toLowerCase().includes('amount'))) {
+        hasHeaderContent = true;
+        topRow = row;
+        break;
       }
     }
     
-    if (hasHeaderData) {
-      topRow = row;
-    } else {
-      break;
-    }
+    if (!hasHeaderContent) break;
   }
   
-  // Find bottom boundary - look for end of table data or "Total" rows
-  let emptyRowCount = 0;
-  for (let row = headerRow + 1; row <= Math.min(headerRow + 25, worksheet.rowCount); row++) {
+  // Step 5: Find bottom boundary - look for end of data or total rows
+  let lastDataRow = headerRow;
+  let foundTotal = false;
+  
+  for (let row = headerRow + 1; row <= Math.min(worksheet.rowCount, headerRow + 50); row++) {
     let hasData = false;
-    let isTotal = false;
+    let rowValues = [];
     
-    // Check this row for data
     for (let col = leftCol; col <= rightCol; col++) {
+      if (gapCols.includes(col)) continue;
+      
       const cell = worksheet.getCell(row, col);
-      const value = getCellValue(cell).trim().toLowerCase();
+      const value = getCellValue(cell);
       
       if (value && !isCellEmpty(cell)) {
         hasData = true;
-        
-        // Check if this is a total row (end marker)
-        if (value.includes('total') && !value.includes('subtotal')) {
-          isTotal = true;
-          bottomRow = row;
-          break;
-        }
+        rowValues.push(value.toLowerCase());
       }
     }
     
-    if (isTotal) {
-      // Found total row - include it and stop
-      bottomRow = row;
-      break;
-    } else if (hasData) {
-      bottomRow = row;
-      emptyRowCount = 0;
+    if (hasData) {
+      lastDataRow = row;
+      
+      // Check if this is a total row
+      const rowText = rowValues.join(' ');
+      if (rowText.includes('total') && !rowText.includes('subtotal')) {
+        foundTotal = true;
+        bottomRow = row;
+        break;
+      }
     } else {
-      emptyRowCount++;
-      // Stop after 2 consecutive empty rows
-      if (emptyRowCount >= 2) break;
+      // Empty row - check if we should stop
+      if (row - lastDataRow > 1) {
+        bottomRow = lastDataRow;
+        break;
+      }
     }
   }
   
-  // Apply minimal padding (reduce from default to avoid capturing extra data)
-  const minPadding = Math.min(padding, 1);
-  const startRow = Math.max(1, topRow - minPadding);
-  const endRow = Math.min(worksheet.rowCount, bottomRow + minPadding);
-  const startCol = Math.max(1, leftCol - minPadding);
-  const endCol = Math.min(worksheet.columnCount, rightCol + minPadding);
+  if (!foundTotal) {
+    bottomRow = lastDataRow;
+  }
+  
+  // Apply minimal padding
+  const finalPadding = Math.min(padding, 1);
+  const startRow = Math.max(1, topRow - finalPadding);
+  const endRow = Math.min(worksheet.rowCount, bottomRow + finalPadding);
+  const startCol = Math.max(1, leftCol - finalPadding);
+  const endCol = Math.min(worksheet.columnCount, rightCol + finalPadding);
   
   // Convert to Excel range notation
   const startCell = worksheet.getCell(startRow, startCol).address;
@@ -358,6 +452,8 @@ function findTableBoundaries(worksheet, headerMatch, padding = 1) {
     startCol,
     endCol,
     headerCell: worksheet.getCell(headerRow, headerCol).address,
+    hasGap: hasSignificantGap,
+    gapColumns: gapCols,
     actualBounds: {
       topRow,
       bottomRow,
