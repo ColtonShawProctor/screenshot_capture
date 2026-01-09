@@ -71,7 +71,7 @@ def find_table_in_all_sheets(doc, header_text):
             print(f"  Found in '{sheet_name}' at row {cell_addr.Row}, col {cell_addr.Column}", file=sys.stderr)
             
             # Found the header - now expand to get full table
-            table_range = expand_to_table(sheet, found)
+            table_range = expand_to_table(sheet, found, header_text)
             if table_range:
                 return sheet, table_range
             else:
@@ -82,38 +82,47 @@ def find_table_in_all_sheets(doc, header_text):
     return None, None
 
 
-def expand_to_table(sheet, header_cell):
+def expand_to_table(sheet, header_cell, table_name):
     """
-    Find table boundaries using strict rules:
-    1. Max 15 columns (no financial table is wider)
-    2. Max 40 rows
-    3. Stop at FIRST truly empty cell in header row
-    4. Stop at FIRST fully empty row
+    Find table boundaries using table-specific max widths
+    and scanning DATA rows instead of header row.
     """
     start_col = header_cell.CellAddress.Column
     start_row = header_cell.CellAddress.Row
     
-    print(f"  Expanding table from row {start_row}, col {start_col}", file=sys.stderr)
+    # Table-specific max widths (known from analysis)
+    max_widths = {
+        'Sources and Uses': 7,
+        'Take Out Loan Sizing': 3,
+        'Capital Stack at Closing': 7,
+        'Loan to Cost': 7,
+        'Loan to Value': 7,
+        'PILOT Schedule': 8,
+    }
     
-    # Find table width - stop at FIRST empty cell in header row
+    max_cols = max_widths.get(table_name, 8)  # Default 8
+    max_rows = 30  # No table is taller than 30 rows
+    
+    print(f"  Expanding '{table_name}' from row {start_row}, col {start_col}", file=sys.stderr)
+    print(f"  Max dimensions: {max_cols} cols x {max_rows} rows", file=sys.stderr)
+    
+    # Find width by scanning a DATA row (2-3 rows after header)
+    # Not the header row which may have merged cells
+    data_row = start_row + 2
     end_col = start_col
-    for col in range(start_col + 1, start_col + 15):  # Max 15 columns
-        cell = sheet.getCellByPosition(col, start_row)
-        value = cell.getString().strip()
-        
-        # If cell is empty, stop (don't skip over gaps)
-        if not value:
-            break
-        end_col = col
     
-    # Find table height - stop at FIRST fully empty row
+    for col in range(start_col, start_col + max_cols):
+        cell = sheet.getCellByPosition(col, data_row)
+        if cell.getString().strip():
+            end_col = col
+    
+    # Ensure minimum width of 2 columns
+    if end_col == start_col:
+        end_col = start_col + max_cols - 1
+    
+    # Find height - stop at first fully empty row
     end_row = start_row
-    for row in range(start_row + 1, start_row + 40):  # Max 40 rows
-        # Check first column of table for content
-        first_cell = sheet.getCellByPosition(start_col, row)
-        first_val = first_cell.getString().strip()
-        
-        # Also check if ANY cell in the row has content
+    for row in range(start_row + 1, start_row + max_rows):
         row_has_content = False
         for col in range(start_col, end_col + 1):
             cell = sheet.getCellByPosition(col, row)
@@ -121,24 +130,23 @@ def expand_to_table(sheet, header_cell):
                 row_has_content = True
                 break
         
-        if not row_has_content:
-            # Found empty row - but check if next row also empty (end of table)
-            # or if it's just a spacer row
-            if row + 1 < start_row + 40:
-                next_row_has_content = False
+        if row_has_content:
+            end_row = row
+        else:
+            # Check if this is a spacer row (next row has content)
+            if row + 1 < start_row + max_rows:
+                next_has_content = False
                 for col in range(start_col, end_col + 1):
                     cell = sheet.getCellByPosition(col, row + 1)
                     if cell.getString().strip():
-                        next_row_has_content = True
+                        next_has_content = True
                         break
-                if not next_row_has_content:
-                    break  # Two empty rows = end of table
+                if not next_has_content:
+                    break  # Two empty rows = end
             else:
                 break
-        else:
-            end_row = row
     
-    print(f"  Table range: cols {start_col}-{end_col}, rows {start_row}-{end_row}", file=sys.stderr)
+    print(f"  Final range: cols {start_col}-{end_col}, rows {start_row}-{end_row}", file=sys.stderr)
     
     return sheet.getCellRangeByPosition(start_col, start_row, end_col, end_row)
 
