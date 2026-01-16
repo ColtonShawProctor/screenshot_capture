@@ -101,58 +101,102 @@ def cell_has_content(cell):
     return False
 
 
+# Known table headers to detect adjacent tables
+KNOWN_TABLE_HEADERS = [
+    'sources and uses',
+    'take out loan sizing',
+    'loan to cost',
+    'loan to value',
+    'capital stack',
+    'release at closing',
+    'draw at closing',
+    'ltc',
+    'ltv',
+    'pilot',
+    'cost basis',
+    'fairbridge metrics',
+    'constructional loan',
+]
+
+
+def is_header_cell(cell):
+    """
+    Check if cell has dark header styling (navy background).
+    Fairbridge headers use dark blue: RGB approximately (0, 32, 96) or similar.
+    LibreOffice UNO: CellBackColor is a 32-bit integer in format 0xAARRGGBB
+    """
+    try:
+        # Get cell background color property
+        # LibreOffice uses getPropertyValue for cell properties
+        props = cell.getPropertySetInfo()
+        if props.hasPropertyByName("CellBackColor"):
+            color = cell.getPropertyValue("CellBackColor")
+            if color is not None and isinstance(color, int):
+                # Extract RGB components from 32-bit integer (0xAARRGGBB format)
+                # Alpha is high byte, but we check RGB
+                r = (color >> 16) & 0xFF
+                g = (color >> 8) & 0xFF
+                b = color & 0xFF
+                
+                # Dark blue detection: low R, low-medium G, higher B
+                # Common Fairbridge header colors: RGB(0,32,96), RGB(15,36,62), RGB(0,51,102)
+                if r < 50 and g < 80 and b > 50:
+                    print(f"    Header cell detected: RGB({r},{g},{b})", file=sys.stderr)
+                    return True
+    except Exception as e:
+        # If property access fails, fall back to content-based detection
+        pass
+    return False
+
+
 def expand_to_table(sheet, header_cell, table_name):
     """
-    Dynamically find table boundaries by scanning for content.
-    Detects columns until multiple consecutive empty columns.
-    Detects rows until multiple consecutive empty rows, ensuring totals are included.
+    Header-based table boundary detection.
+    Uses dark blue header bars as definitive table boundaries.
+    Detects columns until multiple consecutive empty columns (with no header styling).
+    Detects rows until hitting a new table header or 3+ consecutive empty rows.
     """
     start_col = header_cell.CellAddress.Column
     start_row = header_cell.CellAddress.Row
     
     print(f"  Expanding '{table_name}' from row {start_row}, col {start_col}", file=sys.stderr)
     
-    # First, scan header row to get initial column width estimate
-    # This helps us know what columns to check for row detection
-    max_cols_to_scan = 50  # Increased from 10
-    initial_end_col = start_col
+    # Step 1: Determine column boundaries
+    # Scan right from start_col, stop at 3+ consecutive empty columns with no header styling
+    max_cols_to_scan = 50
+    end_col = start_col
+    consecutive_empty = 0
+    max_consecutive_empty = 3
     
-    # Scan header row to find where it ends
     for col in range(start_col, start_col + max_cols_to_scan):
         cell = sheet.getCellByPosition(col, start_row)
-        if cell_has_content(cell):
-            initial_end_col = col
+        has_content = cell_has_content(cell)
+        has_header_style = is_header_cell(cell)
+        
+        if has_content or has_header_style:
+            end_col = col
+            consecutive_empty = 0
         else:
-            # Allow one empty column, but if next is also empty, stop
-            if col + 1 < start_col + max_cols_to_scan:
-                next_cell = sheet.getCellByPosition(col + 1, start_row)
-                if not cell_has_content(next_cell):
-                    break
+            consecutive_empty += 1
+            if consecutive_empty >= max_consecutive_empty:
+                break
     
-    # Now scan down rows to find the actual table width
-    # Tables may have data columns beyond the header row
-    # Scan first 50 rows to find the widest point
+    # Also scan down rows to find widest point (data may extend beyond header)
     rows_for_width_detection = 50
-    end_col = initial_end_col
-    
-    # Scan multiple rows to find the widest point of the table
     for row in range(start_row, start_row + rows_for_width_detection):
-        # Scan right from start_col to find content in this row
         row_end_col = start_col
-        consecutive_empty = 0
-        max_consecutive_empty = 3  # Stop after 3 consecutive empty columns
+        row_consecutive_empty = 0
         
         for col in range(start_col, start_col + max_cols_to_scan):
             cell = sheet.getCellByPosition(col, row)
-            if cell_has_content(cell):
+            if cell_has_content(cell) or is_header_cell(cell):
                 row_end_col = col
-                consecutive_empty = 0
+                row_consecutive_empty = 0
             else:
-                consecutive_empty += 1
-                if consecutive_empty >= max_consecutive_empty:
+                row_consecutive_empty += 1
+                if row_consecutive_empty >= max_consecutive_empty:
                     break
         
-        # Update end_col if this row extends further
         if row_end_col > end_col:
             end_col = row_end_col
     
@@ -162,55 +206,124 @@ def expand_to_table(sheet, header_cell, table_name):
     
     print(f"  Detected width: {end_col - start_col + 1} columns (cols {start_col}-{end_col})", file=sys.stderr)
     
-    # Now detect row height - scan down until multiple consecutive empty rows
-    max_rows_to_scan = 100  # Increased limit
+    # Step 2: Determine row boundaries (header-aware)
+    max_rows_to_scan = 100
     end_row = start_row
     consecutive_empty_rows = 0
-    max_consecutive_empty_rows = 3  # Stop after 3 consecutive empty rows
-    
-    # Keywords that indicate summary/total rows - ensure we include them
+    max_consecutive_empty_rows = 3
+    found_total = False
     total_keywords = ['total', 'sum', 'subtotal', 'grand total', 'summary']
+    current_table_name_lower = table_name.lower()
     
     for row in range(start_row + 1, start_row + max_rows_to_scan):
-        row_has_content = False
-        row_text = ""
+        # Check if this row starts a new table (header styling in first column)
+        first_cell = sheet.getCellByPosition(start_col, row)
+        is_new_header = is_header_cell(first_cell)
         
-        # Check all columns in the detected table width
+        if is_new_header:
+            # Check if it's a different table's header
+            first_cell_text = ""
+            try:
+                first_cell_text = first_cell.getString().strip().lower()
+            except:
+                pass
+            
+            # Check if this header matches a known table header (different from current)
+            is_different_table = False
+            if first_cell_text:
+                for known_header in KNOWN_TABLE_HEADERS:
+                    if known_header in first_cell_text and known_header not in current_table_name_lower:
+                        # Found a different table's header - stop BEFORE this row
+                        print(f"  Stopping at row {row}: detected new table header '{first_cell_text}'", file=sys.stderr)
+                        is_different_table = True
+                        break
+            
+            if is_different_table:
+                # Stop before this row (don't include it)
+                break
+            else:
+                # Might be a subheader of current table - continue but mark as header row
+                print(f"  Row {row}: header styling but same table (subheader?)", file=sys.stderr)
+                end_row = row
+                consecutive_empty_rows = 0
+                continue
+        
+        # Check if row contains known table header text (even without styling)
+        for col in range(start_col, min(end_col + 1, start_col + 3)):
+            cell = sheet.getCellByPosition(col, row)
+            try:
+                cell_text = cell.getString().strip().lower()
+                for known_header in KNOWN_TABLE_HEADERS:
+                    if cell_text == known_header or cell_text.startswith(known_header):
+                        if known_header not in current_table_name_lower:
+                            # Found a different table's header - stop BEFORE
+                            print(f"  Stopping at row {row}: found different table header '{cell_text}'", file=sys.stderr)
+                            return sheet.getCellRangeByPosition(start_col, start_row, end_col, row - 1)
+            except:
+                pass
+        
+        # Check if row is completely empty
+        row_empty = True
+        row_text = ""
         for col in range(start_col, end_col + 1):
             cell = sheet.getCellByPosition(col, row)
             if cell_has_content(cell):
-                row_has_content = True
-                # Collect text for keyword checking
-                cell_text = cell.getString().strip().lower()
-                if cell_text:
-                    row_text += " " + cell_text
+                row_empty = False
+                try:
+                    cell_text = cell.getString().strip().lower()
+                    if cell_text:
+                        row_text += " " + cell_text
+                except:
+                    pass
         
-        if row_has_content:
-            end_row = row
-            consecutive_empty_rows = 0
-            
-            # Check if this row contains total keywords - if so, scan a bit further
-            # to catch any additional summary rows
-            if any(keyword in row_text for keyword in total_keywords):
-                # Found a total row - scan 2-3 more rows to catch additional totals
-                for lookahead_row in range(row + 1, min(row + 4, start_row + max_rows_to_scan)):
-                    lookahead_has_content = False
-                    for col in range(start_col, end_col + 1):
-                        lookahead_cell = sheet.getCellByPosition(col, lookahead_row)
-                        if cell_has_content(lookahead_cell):
-                            lookahead_has_content = True
-                            break
-                    if lookahead_has_content:
-                        end_row = lookahead_row
-                    else:
-                        break
-        else:
+        if row_empty:
             consecutive_empty_rows += 1
             if consecutive_empty_rows >= max_consecutive_empty_rows:
                 # Found multiple consecutive empty rows - table has ended
+                print(f"  Stopping at row {row}: {consecutive_empty_rows} consecutive empty rows", file=sys.stderr)
+                break
+        else:
+            consecutive_empty_rows = 0
+            end_row = row
+            
+            # Check for "Total" row - include it then stop after footnotes
+            first_cell_text = ""
+            try:
+                first_cell_text = first_cell.getString().strip().lower()
+            except:
+                pass
+            
+            if first_cell_text.startswith('total') and not found_total:
+                found_total = True
+                print(f"  Found total row at {row}, scanning for footnotes...", file=sys.stderr)
+                # Continue for 1-2 more rows to catch footnotes (lines starting with *)
+                for extra_row in range(row + 1, min(row + 3, start_row + max_rows_to_scan)):
+                    extra_empty = True
+                    for col in range(start_col, end_col + 1):
+                        extra_cell = sheet.getCellByPosition(col, extra_row)
+                        if cell_has_content(extra_cell):
+                            extra_cell_text = ""
+                            try:
+                                extra_cell_text = extra_cell.getString().strip()
+                            except:
+                                pass
+                            # Include footnote rows (start with *) or empty rows after total
+                            if not extra_cell_text or extra_cell_text.startswith('*'):
+                                extra_empty = False
+                                break
+                            else:
+                                # Non-footnote content - might be next table starting
+                                extra_empty = True
+                                break
+                    
+                    if not extra_empty:
+                        end_row = extra_row
+                    else:
+                        break
+                # Stop after total + footnotes
                 break
     
-    # Add a small buffer (1 row) to ensure we don't cut off borders/formatting
+    # Add small buffer for borders/formatting
     if end_row < start_row + max_rows_to_scan - 1:
         end_row += 1
     
