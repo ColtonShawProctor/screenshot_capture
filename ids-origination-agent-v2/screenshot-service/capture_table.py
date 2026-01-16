@@ -104,6 +104,12 @@ def cell_has_content(cell):
 # Known table headers to detect adjacent tables
 # IMPORTANT: Use EXACT or near-exact matches only
 # Don't include short strings like 'ltv' or 'ltc' alone - they appear as row labels within other tables
+# 
+# DO NOT ADD:
+# - "constructional loan" - it's a COLUMN HEADER within Sources and Uses
+# - "value stress test" - it's a SUBHEADER within LTV Sensitivity Table
+# - "takeout financing chart" - it's a SUBHEADER within LTV Sensitivity Table
+#
 KNOWN_TABLE_HEADERS = [
     'sources and uses',
     'take out loan sizing',
@@ -116,11 +122,8 @@ KNOWN_TABLE_HEADERS = [
     'pilot schedule',
     'cost basis',
     'fairbridge metrics',
-    'constructional loan',
     'disbursements at closing',
-    'ltc',                # BUT only when it's a standalone header cell, not "LTC (At Closing)" row
-    'value stress test',          # Subheader in LTV Sensitivity - NOT a separate table
-    'takeout financing chart',    # Subheader in LTV Sensitivity - NOT a separate table
+    'ltc',                # Standalone 'LTC' header (not 'LTC (At Closing)' which is a row label)
 ]
 
 # Headers that indicate a NEW table even if they share words with current table
@@ -186,12 +189,15 @@ def is_different_table_header(cell_text, current_table_name):
         return False
     
     # Special handling for short labels that could be row labels OR table headers
-    # 'ltc' and 'ltv' alone are table headers
-    # 'ltc (at closing)' or 'ltv take out loan' are row labels
-    if cell_text in ['ltc', 'ltv']:
-        return True  # Standalone short name = table header
-    if cell_text.startswith('ltc ') or cell_text.startswith('ltv '):
+    # 'ltc' alone can be a table header (standalone LTC table)
+    # 'ltc (at closing)' is a row label, not a table header
+    # 'ltv' alone is NOT a table header - it's often a row label (e.g., in Take Out Loan Sizing)
+    # Only "loan to value" (full name) is a table header
+    if cell_text == 'ltc':
+        return True  # Standalone 'ltc' = table header
+    if cell_text.startswith('ltc '):
         return False  # Has suffix = row label like "LTC (At Closing)"
+    # Don't treat standalone 'ltv' as table header - it's usually a row label
     
     for known_header in KNOWN_TABLE_HEADERS:
         # Exact match
@@ -208,9 +214,16 @@ def find_column_boundaries(sheet, header_row, start_col):
     """
     Scan right from start_col to find where table ends horizontally.
     
-    CRITICAL FIX: Don't just check for header styling - check for CONTINUOUS content.
-    Stop when we hit 2+ consecutive empty columns, even if there's a header cell further right.
-    Other tables may be positioned horizontally on the same sheet.
+    CRITICAL: Tables often have empty spacing columns between label and value sections!
+    Example - Loan to Cost table layout:
+    Col 7: "Loan to Cost" (header)
+    Col 8: (empty spacing)
+    Col 9: "At-Closing" values
+    Col 10: (empty spacing)  
+    Col 11: "W/ Carry Costs" values
+    
+    Must use 4+ consecutive empty columns as threshold, not 2.
+    Small gaps (1-3 cols) are spacing within the same table.
     """
     max_col = start_col
     consecutive_empty = 0
@@ -330,6 +343,36 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
                             break
                         else:
                             print(f"  Row {row}: header styling but same table (subheader?) text='{cell_text}'", file=sys.stderr)
+                except:
+                    # Out of bounds - continue to next column
+                    pass
+            
+            if found_new_table:
+                break
+            
+            # Second pass: Check for STRONG table names even WITHOUT blue styling
+            # This catches headers like "Draw at Closing" that might have different styling
+            for col in range(start_col, end_col + 1):
+                try:
+                    cell = sheet.getCellByPosition(col, row)
+                    cell_text = ""
+                    try:
+                        cell_text = cell.getString().strip()
+                    except:
+                        pass
+                    cell_text_lower = cell_text.lower() if cell_text else ""
+                    
+                    if cell_text_lower:
+                        # Check for STRONG table headers even without blue styling
+                        for strong_header in STRONG_TABLE_HEADERS:
+                            if cell_text_lower == strong_header or cell_text_lower.startswith(strong_header + ' '):
+                                # But skip if it's our own table
+                                if strong_header not in current_table_name.lower():
+                                    print(f"  Stopping at row {row}: found strong table name '{cell_text_lower}' (no blue styling)", file=sys.stderr)
+                                    found_new_table = True
+                                    break
+                        if found_new_table:
+                            break
                 except:
                     # Out of bounds - continue to next column
                     pass
