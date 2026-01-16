@@ -103,7 +103,7 @@ def cell_has_content(cell):
 
 # Known table headers to detect adjacent tables
 # IMPORTANT: Use EXACT or near-exact matches only
-# Don't include short strings like 'ltv' or 'ltc' - they appear as row labels within other tables
+# Don't include short strings like 'ltv' or 'ltc' alone - they appear as row labels within other tables
 KNOWN_TABLE_HEADERS = [
     'sources and uses',
     'take out loan sizing',
@@ -112,12 +112,13 @@ KNOWN_TABLE_HEADERS = [
     'capital stack at closing',
     'capital stack',
     'release at closing',
-    'draw at closing',
+    'draw at closing',    # This starts the Draw at Closing mini-table
     'pilot schedule',
     'cost basis',
     'fairbridge metrics',
     'constructional loan',
-    'disbursements at closing',  # Subheader in Release at Closing
+    'disbursements at closing',
+    'ltc',                # BUT only when it's a standalone header cell, not "LTC (At Closing)" row
 ]
 
 
@@ -154,24 +155,37 @@ def is_header_cell(cell):
 def is_different_table_header(cell_text, current_table_name):
     """
     Check if cell_text indicates a DIFFERENT table is starting.
-    Must be a close match to a known header, not just a partial match.
     
-    CRITICAL: 'LTV' as a row label inside Take Out Loan Sizing should NOT trigger this.
-    Only 'Loan to Value' (the full table name) should trigger it.
+    CRITICAL CASES:
+    - 'LTV' row inside Take Out Loan Sizing -> NOT a new table (it's a metric row)
+    - 'Draw at Closing' header -> IS a new table
+    - 'LTC' header -> IS a new table (but 'LTC (At Closing)' is a row label)
     """
     cell_text = cell_text.lower().strip()
     current_lower = current_table_name.lower()
+    
+    # Skip if empty
+    if not cell_text:
+        return False
     
     # Skip if this text is part of our current table name
     if cell_text in current_lower or current_lower in cell_text:
         return False
     
+    # Special handling for short labels that could be row labels OR table headers
+    # 'ltc' and 'ltv' alone are table headers
+    # 'ltc (at closing)' or 'ltv take out loan' are row labels
+    if cell_text in ['ltc', 'ltv']:
+        return True  # Standalone short name = table header
+    if cell_text.startswith('ltc ') or cell_text.startswith('ltv '):
+        return False  # Has suffix = row label like "LTC (At Closing)"
+    
     for known_header in KNOWN_TABLE_HEADERS:
-        # Require exact match or cell starts with the known header
-        if cell_text == known_header or cell_text.startswith(known_header + ' '):
+        # Exact match
+        if cell_text == known_header:
             return True
-        # Also match if known header equals cell text (handles "LTV" != "Loan to Value")
-        if known_header == cell_text:
+        # Cell starts with known header (e.g., "Draw at Closing" matches "draw at closing")
+        if cell_text.startswith(known_header) and len(cell_text) <= len(known_header) + 10:
             return True
     
     return False
@@ -199,14 +213,16 @@ def find_column_boundaries(sheet, header_row, start_col):
             # Don't extend just because a cell has header styling - it could be a different table
             if has_content:
                 # Check if we skipped empty columns to get here
-                if consecutive_empty >= 2:
-                    # There was a gap - this is a different table, stop
+                if consecutive_empty >= 4:
+                    # There was a LARGE gap (4+ empty cols) - this is a different table, stop
+                    # Small gaps (1-3 cols) are spacing within the same table
                     break
                 max_col = col
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
-                if consecutive_empty >= 2:
+                # Use 4+ consecutive empty columns as threshold (allows 1-3 col spacing within tables)
+                if consecutive_empty >= 4:
                     break
         except:
             # Out of bounds - stop scanning
@@ -224,13 +240,14 @@ def find_column_boundaries(sheet, header_row, start_col):
                 has_content = cell_has_content(cell)
                 
                 if has_content:
-                    if row_consecutive_empty >= 2:
+                    if row_consecutive_empty >= 4:
                         break
                     row_max_col = col
                     row_consecutive_empty = 0
                 else:
                     row_consecutive_empty += 1
-                    if row_consecutive_empty >= 2:
+                    # Use 4+ consecutive empty columns as threshold (allows 1-3 col spacing within tables)
+                    if row_consecutive_empty >= 4:
                         break
             except:
                 # Out of bounds - stop scanning this row
@@ -273,12 +290,15 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
             
             # Check for new table header (blue styling + different table name)
             if is_header_cell(first_cell) and first_cell_text:
+                # IMPORTANT: Log the actual cell text for debugging
+                print(f"    Header cell detected at row {row}: '{first_cell_text}'", file=sys.stderr)
+                
                 if is_different_table_header(first_cell_text, current_table_name):
                     print(f"  Stopping at row {row}: detected new table header '{first_cell_lower}'", file=sys.stderr)
                     break
                 else:
                     # Same table subheader - continue
-                    print(f"  Row {row}: header styling but same table (subheader?)", file=sys.stderr)
+                    print(f"  Row {row}: header styling but same table (subheader?) text='{first_cell_text}'", file=sys.stderr)
                     max_row = row
                     consecutive_empty = 0
                     continue
@@ -298,8 +318,30 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
             if row_empty:
                 consecutive_empty += 1
                 if consecutive_empty >= 3:
-                    print(f"  Stopping at row {row}: 3 consecutive empty rows", file=sys.stderr)
-                    break
+                    # Before stopping, scan ahead 5 rows to check for a Total row
+                    # Some tables have empty spacing before the Total
+                    found_total_ahead = False
+                    for scan_row in range(row + 1, min(row + 6, header_row + max_rows_to_scan)):
+                        try:
+                            scan_cell = sheet.getCellByPosition(start_col, scan_row)
+                            scan_text = ""
+                            try:
+                                scan_text = scan_cell.getString().strip()
+                            except:
+                                pass
+                            scan_text_lower = scan_text.lower().strip()
+                            if scan_text_lower.startswith('total'):
+                                print(f"  Found Total row at {scan_row} after empty gap, extending...", file=sys.stderr)
+                                found_total_ahead = True
+                                max_row = scan_row
+                                consecutive_empty = 0
+                                break
+                        except:
+                            pass
+                    
+                    if not found_total_ahead:
+                        print(f"  Stopping at row {row}: 3 consecutive empty rows", file=sys.stderr)
+                        break
             else:
                 consecutive_empty = 0
                 max_row = row
