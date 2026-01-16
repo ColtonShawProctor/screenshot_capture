@@ -210,7 +210,7 @@ def is_different_table_header(cell_text, current_table_name):
     return False
 
 
-def find_column_boundaries(sheet, header_row, start_col):
+def find_column_boundaries(sheet, header_row, start_col, table_name=None):
     """
     Scan right from start_col to find where table ends horizontally.
     
@@ -225,6 +225,10 @@ def find_column_boundaries(sheet, header_row, start_col):
     Must use 4+ consecutive empty columns as threshold, not 2.
     Small gaps (1-3 cols) are spacing within the same table.
     """
+    # SPECIAL CASE: Sources and Uses has side-by-side tables starting at col 9
+    if table_name and 'sources and uses' in table_name.lower():
+        return 8  # Cols 1-7 plus 1 buffer = return 8
+    
     max_col = start_col
     consecutive_empty = 0
     max_cols_to_scan = 100  # Reasonable maximum for Excel sheets
@@ -494,8 +498,8 @@ def expand_to_table(sheet, header_cell, table_name):
     
     print(f"  Expanding '{table_name}' from row {start_row}, col {start_col}", file=sys.stderr)
     
-    # Step 1: Determine column boundaries
-    end_col = find_column_boundaries(sheet, start_row, start_col)
+    # Step 1: Determine column boundaries - pass table_name for special cases
+    end_col = find_column_boundaries(sheet, start_row, start_col, table_name)
     
     # Ensure minimum width
     if end_col < start_col + 1:
