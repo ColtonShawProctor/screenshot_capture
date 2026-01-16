@@ -119,6 +119,19 @@ KNOWN_TABLE_HEADERS = [
     'constructional loan',
     'disbursements at closing',
     'ltc',                # BUT only when it's a standalone header cell, not "LTC (At Closing)" row
+    'value stress test',          # Subheader in LTV Sensitivity - NOT a separate table
+    'takeout financing chart',    # Subheader in LTV Sensitivity - NOT a separate table
+]
+
+# Headers that indicate a NEW table even if they share words with current table
+# "Capital Stack at Closing" has "Sources" column which matches "Sources and Uses"
+STRONG_TABLE_HEADERS = [
+    'capital stack at closing',
+    'capital stack',
+    'draw at closing',
+    'ltc',
+    'loan to cost',
+    'loan to value',
 ]
 
 
@@ -265,8 +278,11 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
     Scan down from header_row to find where table ends vertically.
     
     STOP BEFORE a row if:
-    - Row has header-style background AND contains a different known table name
-    - 3+ consecutive completely empty rows
+    - ANY cell in the row has header-style background AND contains a known table name
+    - 3+ consecutive completely empty rows (after checking for Total ahead)
+    
+    CRITICAL FIX: Check ALL columns for header cells, not just start_col!
+    "Draw at Closing" header might be in column 10 while we started at column 9.
     
     IMPORTANT: Do NOT stop at "Total" rows - some tables have content after Total!
     Example: Release at Closing has:
@@ -280,6 +296,48 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
     
     for row in range(header_row + 1, header_row + max_rows_to_scan):
         try:
+            # CRITICAL: Check ALL columns in this row for header styling
+            found_new_table = False
+            for col in range(start_col, end_col + 1):
+                try:
+                    cell = sheet.getCellByPosition(col, row)
+                    cell_text = ""
+                    try:
+                        cell_text = cell.getString().strip()
+                    except:
+                        pass
+                    
+                    if is_header_cell(cell) and cell_text:
+                        cell_lower = cell_text.lower()
+                        print(f"    Header cell detected at row {row}, col {col}: '{cell_text}'", file=sys.stderr)
+                        
+                        # Check if this is a STRONG table header (always stops, even if name overlaps)
+                        for strong_header in STRONG_TABLE_HEADERS:
+                            if cell_lower == strong_header or cell_lower.startswith(strong_header):
+                                # But skip if it's our own table
+                                if strong_header not in current_table_name.lower():
+                                    print(f"  Stopping at row {row}: detected strong table header '{cell_lower}'", file=sys.stderr)
+                                    found_new_table = True
+                                    break
+                        
+                        if found_new_table:
+                            break
+                            
+                        # Regular check for different table
+                        if is_different_table_header(cell_text, current_table_name):
+                            print(f"  Stopping at row {row}: detected new table header '{cell_lower}'", file=sys.stderr)
+                            found_new_table = True
+                            break
+                        else:
+                            print(f"  Row {row}: header styling but same table (subheader?) text='{cell_text}'", file=sys.stderr)
+                except:
+                    # Out of bounds - continue to next column
+                    pass
+            
+            if found_new_table:
+                break
+            
+            # Check the first cell for logging
             first_cell = sheet.getCellByPosition(start_col, row)
             first_cell_text = ""
             try:
@@ -287,21 +345,6 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
             except:
                 pass
             first_cell_lower = first_cell_text.lower()
-            
-            # Check for new table header (blue styling + different table name)
-            if is_header_cell(first_cell) and first_cell_text:
-                # IMPORTANT: Log the actual cell text for debugging
-                print(f"    Header cell detected at row {row}: '{first_cell_text}'", file=sys.stderr)
-                
-                if is_different_table_header(first_cell_text, current_table_name):
-                    print(f"  Stopping at row {row}: detected new table header '{first_cell_lower}'", file=sys.stderr)
-                    break
-                else:
-                    # Same table subheader - continue
-                    print(f"  Row {row}: header styling but same table (subheader?) text='{first_cell_text}'", file=sys.stderr)
-                    max_row = row
-                    consecutive_empty = 0
-                    continue
             
             # Check if row is completely empty
             row_empty = True
@@ -320,21 +363,29 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
                 if consecutive_empty >= 3:
                     # Before stopping, scan ahead 5 rows to check for a Total row
                     # Some tables have empty spacing before the Total
+                    # Check ALL columns in the scanned rows, not just start_col
                     found_total_ahead = False
                     for scan_row in range(row + 1, min(row + 6, header_row + max_rows_to_scan)):
                         try:
-                            scan_cell = sheet.getCellByPosition(start_col, scan_row)
-                            scan_text = ""
-                            try:
-                                scan_text = scan_cell.getString().strip()
-                            except:
-                                pass
-                            scan_text_lower = scan_text.lower().strip()
-                            if scan_text_lower.startswith('total'):
-                                print(f"  Found Total row at {scan_row} after empty gap, extending...", file=sys.stderr)
-                                found_total_ahead = True
-                                max_row = scan_row
-                                consecutive_empty = 0
+                            # Check all columns in this row for "Total"
+                            for scan_col in range(start_col, end_col + 1):
+                                try:
+                                    scan_cell = sheet.getCellByPosition(scan_col, scan_row)
+                                    scan_text = ""
+                                    try:
+                                        scan_text = scan_cell.getString().strip()
+                                    except:
+                                        pass
+                                    scan_text_lower = scan_text.lower().strip()
+                                    if scan_text_lower.startswith('total'):
+                                        print(f"  Found Total row at {scan_row} after empty gap, extending...", file=sys.stderr)
+                                        found_total_ahead = True
+                                        max_row = scan_row
+                                        consecutive_empty = 0
+                                        break
+                                except:
+                                    pass
+                            if found_total_ahead:
                                 break
                         except:
                             pass
