@@ -291,11 +291,18 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
     Scan down from header_row to find where table ends vertically.
     
     STOP BEFORE a row if:
-    - ANY cell in the row has header-style background AND contains a known table name
+    - A cell NEAR start_col has header-style background AND contains a known table name
+    - A cell NEAR start_col contains a STRONG table name (even without blue styling!)
     - 3+ consecutive completely empty rows (after checking for Total ahead)
     
-    CRITICAL FIX: Check ALL columns for header cells, not just start_col!
+    CRITICAL FIX 1: Check columns NEAR start_col (within 3 columns) for header cells!
     "Draw at Closing" header might be in column 10 while we started at column 9.
+    
+    CRITICAL FIX 2: IGNORE headers that are far from start_col (4+ columns to the right).
+    These are SIDE-BY-SIDE tables, not tables below the current one.
+    
+    Example: Sources and Uses starts at col 1. "Take Out Loan Sizing" at col 9 is a 
+    side-by-side table, NOT a table below. Don't stop for it.
     
     IMPORTANT: Do NOT stop at "Total" rows - some tables have content after Total!
     Example: Release at Closing has:
@@ -307,11 +314,17 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
     consecutive_empty = 0
     max_rows_to_scan = 200  # Reasonable maximum for Excel sheets
     
+    # Define "near" as within 3 columns of start_col
+    # Headers further right are probably side-by-side tables
+    near_col_max = start_col + 3
+    
     for row in range(header_row + 1, header_row + max_rows_to_scan):
         try:
-            # CRITICAL: Check ALL columns in this row for header styling
+            # CRITICAL: Check columns NEAR start_col for header styling
             found_new_table = False
-            for col in range(start_col, end_col + 1):
+            
+            # First pass: Check for header cells with blue styling (only near start_col)
+            for col in range(start_col, min(near_col_max + 1, end_col + 1)):
                 try:
                     cell = sheet.getCellByPosition(col, row)
                     cell_text = ""
@@ -350,9 +363,28 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
             if found_new_table:
                 break
             
-            # Second pass: Check for STRONG table names even WITHOUT blue styling
+            # Log headers found FAR from start_col (side-by-side tables) but DON'T stop
+            for col in range(near_col_max + 1, end_col + 1):
+                try:
+                    cell = sheet.getCellByPosition(col, row)
+                    cell_text = ""
+                    try:
+                        cell_text = cell.getString().strip()
+                    except:
+                        pass
+                    
+                    if is_header_cell(cell) and cell_text:
+                        cell_lower = cell_text.lower()
+                        for known_header in KNOWN_TABLE_HEADERS:
+                            if cell_lower == known_header or cell_lower.startswith(known_header):
+                                print(f"    (Ignoring side-by-side table at row {row}, col {col}: '{cell_text}')", file=sys.stderr)
+                                break
+                except:
+                    pass
+            
+            # Second pass: Check for STRONG table names even WITHOUT blue styling (only near start_col)
             # This catches headers like "Draw at Closing" that might have different styling
-            for col in range(start_col, end_col + 1):
+            for col in range(start_col, min(near_col_max + 1, end_col + 1)):
                 try:
                     cell = sheet.getCellByPosition(col, row)
                     cell_text = ""
@@ -389,9 +421,9 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
                 pass
             first_cell_lower = first_cell_text.lower()
             
-            # Check if row is completely empty
+            # Check if row is completely empty (only check columns near start_col)
             row_empty = True
-            for col in range(start_col, end_col + 1):
+            for col in range(start_col, min(near_col_max + 4, end_col + 1)):
                 try:
                     cell = sheet.getCellByPosition(col, row)
                     if cell_has_content(cell):
@@ -406,12 +438,12 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
                 if consecutive_empty >= 3:
                     # Before stopping, scan ahead 5 rows to check for a Total row
                     # Some tables have empty spacing before the Total
-                    # Check ALL columns in the scanned rows, not just start_col
+                    # Check columns near start_col in the scanned rows
                     found_total_ahead = False
                     for scan_row in range(row + 1, min(row + 6, header_row + max_rows_to_scan)):
                         try:
-                            # Check all columns in this row for "Total"
-                            for scan_col in range(start_col, end_col + 1):
+                            # Check columns near start_col for "Total"
+                            for scan_col in range(start_col, min(near_col_max + 4, end_col + 1)):
                                 try:
                                     scan_cell = sheet.getCellByPosition(scan_col, scan_row)
                                     scan_text = ""
