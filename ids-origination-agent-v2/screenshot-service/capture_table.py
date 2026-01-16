@@ -82,70 +82,139 @@ def find_table_in_all_sheets(doc, header_text):
     return None, None
 
 
+def cell_has_content(cell):
+    """Check if a cell has any content (text, numbers, formulas)."""
+    try:
+        # Check for string content
+        if cell.getString().strip():
+            return True
+        # Check for numeric value
+        if cell.getValue() is not None:
+            val = cell.getValue()
+            if isinstance(val, (int, float)) and val != 0:
+                return True
+        # Check for formula
+        if cell.getFormula():
+            return True
+    except:
+        pass
+    return False
+
+
 def expand_to_table(sheet, header_cell, table_name):
     """
-    Find table boundaries using table-specific fixed widths
-    and scanning for height.
+    Dynamically find table boundaries by scanning for content.
+    Detects columns until multiple consecutive empty columns.
+    Detects rows until multiple consecutive empty rows, ensuring totals are included.
     """
     start_col = header_cell.CellAddress.Column
     start_row = header_cell.CellAddress.Row
     
-    # Table-specific FIXED widths (use these exactly for known tables)
-    fixed_widths = {
-        'Sources and Uses': 7,
-        'Take Out Loan Sizing': 3,  # J, K, L columns
-        'Capital Stack at Closing': 7,
-        'Loan to Cost': 8,  # Was 7, increased
-        'Loan to Value': 7,
-        'PILOT Schedule': 8,
-    }
-    
     print(f"  Expanding '{table_name}' from row {start_row}, col {start_col}", file=sys.stderr)
     
-    # For known tables, USE the fixed width
-    if table_name in fixed_widths:
-        end_col = start_col + fixed_widths[table_name] - 1
-        print(f"  Using fixed width: {fixed_widths[table_name]} columns", file=sys.stderr)
-    else:
-        # For unknown tables, scan for content
-        end_col = start_col
-        for col in range(start_col, start_col + 10):
-            cell = sheet.getCellByPosition(col, start_row)
-            if cell.getString().strip():
-                end_col = col
-            else:
-                break
-        # Ensure minimum width of 2 columns
-        if end_col == start_col:
-            end_col = start_col + 1
+    # First, scan header row to get initial column width estimate
+    # This helps us know what columns to check for row detection
+    max_cols_to_scan = 50  # Increased from 10
+    initial_end_col = start_col
     
-    # Find height - stop at first fully empty row
-    max_rows = 30
+    # Scan header row to find where it ends
+    for col in range(start_col, start_col + max_cols_to_scan):
+        cell = sheet.getCellByPosition(col, start_row)
+        if cell_has_content(cell):
+            initial_end_col = col
+        else:
+            # Allow one empty column, but if next is also empty, stop
+            if col + 1 < start_col + max_cols_to_scan:
+                next_cell = sheet.getCellByPosition(col + 1, start_row)
+                if not cell_has_content(next_cell):
+                    break
+    
+    # Now scan down rows to find the actual table width
+    # Tables may have data columns beyond the header row
+    # Scan first 50 rows to find the widest point
+    rows_for_width_detection = 50
+    end_col = initial_end_col
+    
+    # Scan multiple rows to find the widest point of the table
+    for row in range(start_row, start_row + rows_for_width_detection):
+        # Scan right from start_col to find content in this row
+        row_end_col = start_col
+        consecutive_empty = 0
+        max_consecutive_empty = 3  # Stop after 3 consecutive empty columns
+        
+        for col in range(start_col, start_col + max_cols_to_scan):
+            cell = sheet.getCellByPosition(col, row)
+            if cell_has_content(cell):
+                row_end_col = col
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+                if consecutive_empty >= max_consecutive_empty:
+                    break
+        
+        # Update end_col if this row extends further
+        if row_end_col > end_col:
+            end_col = row_end_col
+    
+    # Ensure minimum width
+    if end_col < start_col + 1:
+        end_col = start_col + 1
+    
+    print(f"  Detected width: {end_col - start_col + 1} columns (cols {start_col}-{end_col})", file=sys.stderr)
+    
+    # Now detect row height - scan down until multiple consecutive empty rows
+    max_rows_to_scan = 100  # Increased limit
     end_row = start_row
-    for row in range(start_row + 1, start_row + max_rows):
+    consecutive_empty_rows = 0
+    max_consecutive_empty_rows = 3  # Stop after 3 consecutive empty rows
+    
+    # Keywords that indicate summary/total rows - ensure we include them
+    total_keywords = ['total', 'sum', 'subtotal', 'grand total', 'summary']
+    
+    for row in range(start_row + 1, start_row + max_rows_to_scan):
         row_has_content = False
+        row_text = ""
+        
+        # Check all columns in the detected table width
         for col in range(start_col, end_col + 1):
             cell = sheet.getCellByPosition(col, row)
-            if cell.getString().strip():
+            if cell_has_content(cell):
                 row_has_content = True
-                break
+                # Collect text for keyword checking
+                cell_text = cell.getString().strip().lower()
+                if cell_text:
+                    row_text += " " + cell_text
         
         if row_has_content:
             end_row = row
-        else:
-            # Check if this is a spacer row (next row has content)
-            if row + 1 < start_row + max_rows:
-                next_has_content = False
-                for col in range(start_col, end_col + 1):
-                    cell = sheet.getCellByPosition(col, row + 1)
-                    if cell.getString().strip():
-                        next_has_content = True
+            consecutive_empty_rows = 0
+            
+            # Check if this row contains total keywords - if so, scan a bit further
+            # to catch any additional summary rows
+            if any(keyword in row_text for keyword in total_keywords):
+                # Found a total row - scan 2-3 more rows to catch additional totals
+                for lookahead_row in range(row + 1, min(row + 4, start_row + max_rows_to_scan)):
+                    lookahead_has_content = False
+                    for col in range(start_col, end_col + 1):
+                        lookahead_cell = sheet.getCellByPosition(col, lookahead_row)
+                        if cell_has_content(lookahead_cell):
+                            lookahead_has_content = True
+                            break
+                    if lookahead_has_content:
+                        end_row = lookahead_row
+                    else:
                         break
-                if not next_has_content:
-                    break  # Two empty rows = end
-            else:
+        else:
+            consecutive_empty_rows += 1
+            if consecutive_empty_rows >= max_consecutive_empty_rows:
+                # Found multiple consecutive empty rows - table has ended
                 break
     
+    # Add a small buffer (1 row) to ensure we don't cut off borders/formatting
+    if end_row < start_row + max_rows_to_scan - 1:
+        end_row += 1
+    
+    print(f"  Detected height: {end_row - start_row + 1} rows (rows {start_row}-{end_row})", file=sys.stderr)
     print(f"  Final range: cols {start_col}-{end_col}, rows {start_row}-{end_row}", file=sys.stderr)
     
     return sheet.getCellRangeByPosition(start_col, start_row, end_col, end_row)
