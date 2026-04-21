@@ -1,6 +1,6 @@
 # Excel Screenshot Service
 
-A microservice that converts Excel spreadsheet ranges into PNG screenshots for the IDS Origination Agent.
+A microservice that converts Excel spreadsheet ranges into PNG screenshots.
 
 ## Features
 
@@ -93,7 +93,7 @@ Not Found Response (404):
 
 ## Supported Table Names
 
-The service recognizes these common table types in Fairbridge S&U Excel files:
+The service recognizes these common table types in Excel models:
 
 | Table Name | Common Variations | Typical Location |
 |------------|-------------------|------------------|

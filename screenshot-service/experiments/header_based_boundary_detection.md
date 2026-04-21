@@ -43,7 +43,7 @@
 - Color format: LibreOffice uses 32-bit integer (0xAARRGGBB format)
 
 ### Key Insight
-Fairbridge Excel models use consistent dark blue headers (RGB ~0,32,96 or similar). These are visual markers that can be detected programmatically via cell background color, providing a more reliable boundary than content gaps.
+Some Excel models use consistent dark blue headers (RGB ~0,32,96 or similar). These visual markers can be detected programmatically via cell background color, providing a more reliable boundary than content gaps.
 
 ## Surgical Plan
 

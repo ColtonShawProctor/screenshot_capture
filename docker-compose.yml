@@ -1,6 +1,4 @@
-# Docker Compose for Coolify Deployment
-# This file is for the screenshot service only
-# n8n is already deployed separately
+# Docker Compose for deploying the screenshot service
 
 services:
   excel-screenshot:
@@ -16,5 +14,4 @@ services:
       retries: 3
       start_period: 40s
     restart: unless-stopped
-    # No ports exposed - internal communication only
-    # Service will be accessible at http://excel-screenshot:3000 from n8n
+    # No ports exposed by default (internal communication only)

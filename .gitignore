@@ -1,13 +1,32 @@
-# Ignore everything except ids-origination-agent-v2
-*
-!.gitignore
-!ids-origination-agent-v2/
-ids-origination-agent-v2/**/*
-
-# But include ids-origination-agent-v2 files
-!ids-origination-agent-v2/**
-!.gitignore
-
-# Exclude node_modules
+# Dependencies
 **/node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build / cache
+dist/
+build/
+.cache/
+.parcel-cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Env files
+.env
+.env.*
 
