@@ -56,73 +56,49 @@ setTimeout(() => {
 }, 5000);
 
 app.post('/detect-and-capture', async (req, res) => {
-    const { excelBase64, tableName, filename } = req.body;
-    
-    console.log(`[${new Date().toISOString()}] Request: tableName=${tableName}`);
-    
+    const { excelBase64, tableName, filename, dpi } = req.body;
+
     if (!excelBase64 || !tableName) {
-        console.log('Request failed: Missing excelBase64 or tableName');
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Missing excelBase64 or tableName' 
-        });
+        return res.status(400).json({ success: false, error: 'Missing excelBase64 or tableName' });
     }
-    
+
     try {
-        console.log('Calling captureTable...');
-        const result = await captureTable(excelBase64, tableName);
-        console.log('captureTable completed:', result.success ? 'SUCCESS' : 'FAILED');
+        const result = await captureTable(excelBase64, tableName, { dpi });
         res.json(result);
     } catch (error) {
-        console.error('captureTable error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
+        console.error('Capture error:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-function captureTable(excelBase64, tableName) {
+function captureTable(excelBase64, tableName, options = {}) {
     return new Promise((resolve, reject) => {
         const python = spawn('python3', ['/app/capture_table.py']);
-        
+
         let stdout = '';
         let stderr = '';
-        
-        python.stdin.write(JSON.stringify({ excelBase64, tableName }));
+
+        const payload = { excelBase64, tableName };
+        if (options.dpi !== undefined) payload.dpi = options.dpi;
+
+        python.stdin.write(JSON.stringify(payload));
         python.stdin.end();
-        
-        python.stdout.on('data', (data) => { 
-            stdout += data; 
-            // Remove this line - don't log raw stdout
-        });
-        python.stderr.on('data', (data) => { 
-            stderr += data;
-            console.log(`STDERR: ${data}`);  // LOG IT IMMEDIATELY
-        });
-        
+
+        python.stdout.on('data', (data) => { stdout += data; });
+        python.stderr.on('data', (data) => { stderr += data; });
+
         python.on('close', (code) => {
-            // Parse and log summary ONLY
-            let result;
-            try {
-                result = JSON.parse(stdout);
-                console.log(`[${tableName}] success=${result.success}, hasImage=${!!result.image}, error=${result.error || 'none'}`);
-            } catch (e) {
-                console.log(`[${tableName}] Failed to parse response, stdout length: ${stdout.length}`);
-            }
-            
-            if (stderr) {
-                console.log(`[${tableName}] stderr: ${stderr}`);
-            }
-            
-            if (code === 0 && result) {
-                resolve(result);
+            if (code === 0 && stdout) {
+                try {
+                    resolve(JSON.parse(stdout));
+                } catch (e) {
+                    reject(new Error(`Invalid JSON: ${stdout}`));
+                }
             } else {
-                reject(new Error(result?.error || stderr || `Exit code ${code}`));
+                reject(new Error(stderr || `Exit code ${code}`));
             }
         });
-        
-        // Timeout after 60 seconds
+
         setTimeout(() => {
             python.kill();
             reject(new Error('Timeout'));

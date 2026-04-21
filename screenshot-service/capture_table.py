@@ -141,7 +141,7 @@ STRONG_TABLE_HEADERS = [
 def is_header_cell(cell):
     """
     Check if cell has dark header styling (navy background).
-    Fairbridge headers use dark blue: RGB approximately (0, 32, 96) or similar.
+    Many spreadsheet templates use dark blue headers: RGB approximately (0, 32, 96) or similar.
     LibreOffice UNO: CellBackColor is a 32-bit integer in format 0xAARRGGBB
     """
     try:
@@ -158,7 +158,7 @@ def is_header_cell(cell):
                 b = color & 0xFF
                 
                 # Dark blue detection: low R, low-medium G, higher B
-                # Common Fairbridge header colors: RGB(0,32,96), RGB(15,36,62), RGB(0,51,102)
+                # Common dark-blue header colors: RGB(0,32,96), RGB(15,36,62), RGB(0,51,102)
                 if r < 50 and g < 80 and b > 50:
                     print(f"    Header cell detected: RGB({r},{g},{b})", file=sys.stderr)
                     return True
@@ -312,7 +312,7 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
     Example: Release at Closing has:
       - Total Disbursements (row 16)
       - (-) Sponsor's Equity at Closing (row 18)  <- MUST INCLUDE
-      - Fairbridge Release at Closing (row 19)   <- MUST INCLUDE
+      - Release at Closing (row 19)   <- MUST INCLUDE
     """
     max_row = header_row
     consecutive_empty = 0
@@ -516,7 +516,7 @@ def expand_to_table(sheet, header_cell, table_name):
     return sheet.getCellRangeByPosition(start_col, start_row, end_col, end_row)
 
 
-def export_range_as_image(doc, sheet, table_range, output_path):
+def export_range_as_image(doc, sheet, table_range, output_path, dpi=600):
     """
     Set print area to table range, export as PDF, convert to PNG.
     """
@@ -568,7 +568,7 @@ def export_range_as_image(doc, sheet, table_range, output_path):
     # Convert PDF to PNG using pdftoppm
     png_base = output_path.replace('.png', '')
     subprocess.run([
-        'pdftoppm', '-png', '-r', '150', '-singlefile',
+        'pdftoppm', '-png', '-r', str(dpi), '-singlefile',
         pdf_path, png_base
     ], check=True, capture_output=True)
     
@@ -587,7 +587,7 @@ def export_range_as_image(doc, sheet, table_range, output_path):
         os.unlink(pdf_path)
 
 
-def capture_single_table(desktop, excel_path, table_name, output_path):
+def capture_single_table(desktop, excel_path, table_name, output_path, dpi=600):
     """Open doc, capture ONE table, close doc."""
     
     # Open fresh document
@@ -612,7 +612,7 @@ def capture_single_table(desktop, excel_path, table_name, output_path):
             return False, f"Table '{table_name}' not found in any sheet"
         
         # Export the range
-        export_range_as_image(doc, sheet, table_range, output_path)
+        export_range_as_image(doc, sheet, table_range, output_path, dpi=dpi)
         
         return True, "Success"
         
@@ -627,6 +627,7 @@ def main():
         
         excel_base64 = input_data['excelBase64']
         table_name = input_data['tableName']
+        dpi = input_data.get('dpi', 600)
         
         # Save Excel to temp file
         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
@@ -640,7 +641,7 @@ def main():
             desktop = connect_to_libreoffice()
             
             # Capture single table with fresh document
-            success, message = capture_single_table(desktop, excel_path, table_name, output_path)
+            success, message = capture_single_table(desktop, excel_path, table_name, output_path, dpi=dpi)
             
             if not success:
                 print(json.dumps({
