@@ -47,38 +47,85 @@ def clear_all_print_areas(doc):
         sheet.setPrintAreas(())  # Empty tuple clears
 
 
+def looks_like_real_table_title(sheet, header_row, header_col, header_text):
+    """
+    Distinguish a real table title from a navigation/section banner.
+
+    A real table title has a navy-styled column-header row within 1-3 rows below
+    that contains DIFFERENT text (e.g., "Sources", "Uses"). A section banner is
+    typically followed by empty rows or a duplicate plain-text title before the
+    actual table.
+    """
+    header_lower = header_text.lower().strip()
+    for offset in range(1, 4):
+        for col in range(header_col, header_col + 8):
+            try:
+                cell = sheet.getCellByPosition(col, header_row + offset)
+                if not is_header_cell(cell):
+                    continue
+                text = cell.getString().strip().lower()
+                if text and text != header_lower and header_lower not in text and text not in header_lower:
+                    return True
+            except:
+                pass
+    return False
+
+
 def find_table_in_all_sheets(doc, header_text):
     """
     Search ALL sheets for the header text with debug logging.
     Returns (sheet, cell_range) or (None, None) if not found.
+
+    When multiple matches exist in a sheet, prefer the one that looks like a
+    real table title (has navy column headers below it) over a section banner.
     """
     sheets = doc.getSheets()
-    
+
     print(f"Searching for '{header_text}' in {sheets.getCount()} sheets", file=sys.stderr)
-    
+
     for i in range(sheets.getCount()):
         sheet = sheets.getByIndex(i)
         sheet_name = sheet.getName()
-        
-        # Create search descriptor
+
         search = sheet.createSearchDescriptor()
         search.SearchString = header_text
         search.SearchCaseSensitive = False
-        
+
+        matches = []
         found = sheet.findFirst(search)
-        if found:
-            cell_addr = found.getCellAddress()
-            print(f"  Found in '{sheet_name}' at row {cell_addr.Row}, col {cell_addr.Column}", file=sys.stderr)
-            
-            # Found the header - now expand to get full table
-            table_range = expand_to_table(sheet, found, header_text)
-            if table_range:
-                return sheet, table_range
-            else:
-                print(f"  Could not expand to valid table range in '{sheet_name}'", file=sys.stderr)
-        else:
+        seen = set()
+        while found:
+            addr = found.getCellAddress()
+            key = (addr.Row, addr.Column)
+            if key in seen:
+                break
+            seen.add(key)
+            matches.append(found)
+            found = sheet.findNext(found, search)
+
+        if not matches:
             print(f"  Not found in '{sheet_name}'", file=sys.stderr)
-    
+            continue
+
+        chosen = None
+        for match in matches:
+            addr = match.getCellAddress()
+            if looks_like_real_table_title(sheet, addr.Row, addr.Column, header_text):
+                chosen = match
+                print(f"  Found real table title in '{sheet_name}' at row {addr.Row}, col {addr.Column} ({len(matches)} matches total)", file=sys.stderr)
+                break
+
+        if not chosen:
+            chosen = matches[0]
+            addr = chosen.getCellAddress()
+            print(f"  No clear table title; using first match in '{sheet_name}' at row {addr.Row}, col {addr.Column}", file=sys.stderr)
+
+        table_range = expand_to_table(sheet, chosen, header_text)
+        if table_range:
+            return sheet, table_range
+        else:
+            print(f"  Could not expand to valid table range in '{sheet_name}'", file=sys.stderr)
+
     return None, None
 
 
