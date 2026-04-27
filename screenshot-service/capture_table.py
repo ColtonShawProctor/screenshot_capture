@@ -47,38 +47,91 @@ def clear_all_print_areas(doc):
         sheet.setPrintAreas(())  # Empty tuple clears
 
 
+def has_navy_columns_below(sheet, header_row, header_col, within_rows=2, scan_cols=12):
+    """
+    Return True if a navy-styled cell with text content is found in the
+    `within_rows` rows immediately below (header_row, header_col).
+
+    A real table title is followed almost immediately by a navy column-header
+    bar (e.g. "Sources" / "Uses"). A page-section banner is separated from the
+    actual table by empty/spacing rows.
+    """
+    for offset in range(1, within_rows + 1):
+        for col in range(header_col, header_col + scan_cols):
+            try:
+                cell = sheet.getCellByPosition(col, header_row + offset)
+                if is_header_cell(cell):
+                    text = ""
+                    try:
+                        text = cell.getString().strip()
+                    except:
+                        pass
+                    if text:
+                        return True
+            except:
+                pass
+    return False
+
+
 def find_table_in_all_sheets(doc, header_text):
     """
     Search ALL sheets for the header text with debug logging.
     Returns (sheet, cell_range) or (None, None) if not found.
+
+    When multiple matches exist in a single sheet (e.g. a section banner above
+    the actual table title), prefer the one that has a navy column-header row
+    immediately below it. Falls back to the first match if none qualify or if
+    the multi-match search itself fails for any reason.
     """
     sheets = doc.getSheets()
-    
+
     print(f"Searching for '{header_text}' in {sheets.getCount()} sheets", file=sys.stderr)
-    
+
     for i in range(sheets.getCount()):
         sheet = sheets.getByIndex(i)
         sheet_name = sheet.getName()
-        
-        # Create search descriptor
+
         search = sheet.createSearchDescriptor()
         search.SearchString = header_text
         search.SearchCaseSensitive = False
-        
-        found = sheet.findFirst(search)
-        if found:
-            cell_addr = found.getCellAddress()
-            print(f"  Found in '{sheet_name}' at row {cell_addr.Row}, col {cell_addr.Column}", file=sys.stderr)
-            
-            # Found the header - now expand to get full table
-            table_range = expand_to_table(sheet, found, header_text)
-            if table_range:
-                return sheet, table_range
-            else:
-                print(f"  Could not expand to valid table range in '{sheet_name}'", file=sys.stderr)
-        else:
+
+        first = sheet.findFirst(search)
+        if not first:
             print(f"  Not found in '{sheet_name}'", file=sys.stderr)
-    
+            continue
+
+        chosen = first
+        try:
+            all_matches = sheet.findAll(search)
+            count = all_matches.getCount() if all_matches else 0
+            if count > 1:
+                preferred = None
+                for j in range(count):
+                    m = all_matches.getByIndex(j)
+                    addr = m.getCellAddress()
+                    if has_navy_columns_below(sheet, addr.Row, addr.Column):
+                        preferred = m
+                        print(f"  Preferring match at row {addr.Row}, col {addr.Column} (navy column headers below) — {count} total matches", file=sys.stderr)
+                        break
+                if preferred is not None:
+                    chosen = preferred
+                else:
+                    addr = first.getCellAddress()
+                    print(f"  {count} matches, none had navy headers below; using first at row {addr.Row}, col {addr.Column}", file=sys.stderr)
+            else:
+                addr = first.getCellAddress()
+                print(f"  Found in '{sheet_name}' at row {addr.Row}, col {addr.Column}", file=sys.stderr)
+        except Exception as e:
+            addr = first.getCellAddress()
+            print(f"  findAll failed ({e}); using first match at row {addr.Row}, col {addr.Column}", file=sys.stderr)
+            chosen = first
+
+        table_range = expand_to_table(sheet, chosen, header_text)
+        if table_range:
+            return sheet, table_range
+        else:
+            print(f"  Could not expand to valid table range in '{sheet_name}'", file=sys.stderr)
+
     return None, None
 
 
