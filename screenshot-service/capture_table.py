@@ -244,11 +244,22 @@ def is_different_table_header(cell_text, current_table_name):
     """
     cell_text = cell_text.lower().strip()
     current_lower = current_table_name.lower()
-    
+
     # Skip if empty
     if not cell_text:
         return False
-    
+
+    # Sibling sub-tables often share a suffix with each other and with the
+    # requested table name (e.g., requesting "Loan to Cost" matches the first
+    # navy header "A-Note Loan to Cost"; below it sit "A-Note Loan to Value",
+    # "Total Loan to Cost", "Total Loan to Value"). Detect the prefixed form
+    # via endswith so we stop at the next sub-table.
+    for known_header in KNOWN_TABLE_HEADERS:
+        if len(known_header) < 6:
+            continue  # skip short ambiguous tokens like 'ltc'
+        if cell_text != known_header and cell_text.endswith(' ' + known_header):
+            return True
+
     # Skip if this text is part of our current table name
     if cell_text in current_lower or current_lower in cell_text:
         return False
