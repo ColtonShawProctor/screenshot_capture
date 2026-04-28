@@ -221,6 +221,18 @@ def is_header_cell(cell):
     return False
 
 
+def is_bold(cell):
+    """Check if a cell has bold text. Used to identify section titles
+    in templates where titles are bold-on-white instead of navy bars."""
+    try:
+        weight = cell.getPropertyValue("CharWeight")
+        if weight is not None and weight >= 150:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def is_different_table_header(cell_text, current_table_name):
     """
     Check if cell_text indicates a DIFFERENT table is starting.
@@ -369,11 +381,14 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
     """
     max_row = header_row
     consecutive_empty = 0
+    saw_total = False
+    saw_empty_after_total = False
     max_rows_to_scan = 200  # Reasonable maximum for Excel sheets
-    
+
     # Define "near" as within 3 columns of start_col
     # Headers further right are probably side-by-side tables
     near_col_max = start_col + 3
+    current_table_lower = current_table_name.lower()
     
     for row in range(header_row + 1, header_row + max_rows_to_scan):
         try:
@@ -468,7 +483,40 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
             
             if found_new_table:
                 break
-            
+
+            # Third pass: After we've seen a Total row + at least one empty row,
+            # any bold cell that exactly matches a known table title is a strong
+            # "next section starts here" signal. Templates often style section
+            # titles as bold-on-white (no navy fill), so the first/second passes
+            # miss them. The Total+empty gating prevents false positives on row
+            # labels mid-table.
+            if saw_total and saw_empty_after_total:
+                for col in range(start_col, end_col + 1):
+                    try:
+                        cell = sheet.getCellByPosition(col, row)
+                        cell_text = ""
+                        try:
+                            cell_text = cell.getString().strip()
+                        except:
+                            pass
+                        if not cell_text or not is_bold(cell):
+                            continue
+                        cell_lower = cell_text.lower()
+                        if cell_lower == current_table_lower:
+                            continue
+                        for known_header in KNOWN_TABLE_HEADERS:
+                            if cell_lower == known_header and known_header not in current_table_lower:
+                                print(f"  Stopping at row {row}: post-total bold section title '{cell_text}' at col {col}", file=sys.stderr)
+                                found_new_table = True
+                                break
+                        if found_new_table:
+                            break
+                    except:
+                        pass
+
+            if found_new_table:
+                break
+
             # Check the first cell for logging
             first_cell = sheet.getCellByPosition(start_col, row)
             first_cell_text = ""
@@ -491,6 +539,8 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
                     pass
             
             if row_empty:
+                if saw_total:
+                    saw_empty_after_total = True
                 consecutive_empty += 1
                 if consecutive_empty >= 3:
                     # Before stopping, scan ahead 5 rows to check for a Total row
@@ -531,6 +581,7 @@ def find_row_boundaries(sheet, header_row, start_col, end_col, current_table_nam
                 
                 # Log total rows for debugging, but DON'T stop
                 if first_cell_lower.startswith('total'):
+                    saw_total = True
                     print(f"  Found total row at {row}, continuing scan...", file=sys.stderr)
         except:
             # Out of bounds - stop scanning
